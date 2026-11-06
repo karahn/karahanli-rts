@@ -5,9 +5,10 @@
  */
 
 import Phaser from 'phaser';
+import { IsoGrid } from './isoGrid';
 
 class MainScene extends Phaser.Scene {
-  private centerRect?: Phaser.GameObjects.Graphics;
+  private isoGrid?: IsoGrid;
   private titleText?: Phaser.GameObjects.Text;
   private subtitleText?: Phaser.GameObjects.Text;
 
@@ -22,18 +23,18 @@ class MainScene extends Phaser.Scene {
   create(): void {
     const { width, height } = this.scale;
 
-    const rectWidth = 220;
-    const rectHeight = 130;
-
-    this.centerRect = this.add.graphics();
-    this.centerRect.fillStyle(0x10b981, 1);
-    this.centerRect.fillRect(-rectWidth / 2, -rectHeight / 2, rectWidth, rectHeight);
-    this.centerRect.lineStyle(3, 0xf59e0b, 1);
-    this.centerRect.strokeRect(-rectWidth / 2, -rectHeight / 2, rectWidth, rectHeight);
-    this.centerRect.setPosition(width / 2, height / 2);
+    this.isoGrid = new IsoGrid(this, {
+      cols: 8,
+      rows: 8,
+      tileWidth: 72,
+      tileHeight: 36,
+      fillColor: 0x2d6a4f,
+      strokeColor: 0x74c69d
+    });
+    this.isoGrid.setPosition(width / 2, height / 2 + 24);
 
     this.titleText = this.add
-      .text(width / 2, height / 2 - 120, 'KARAHANLI RTS', {
+      .text(width / 2, 42, 'KARAHANLI RTS', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         fontSize: '32px',
         fontStyle: 'bold',
@@ -42,7 +43,7 @@ class MainScene extends Phaser.Scene {
       .setOrigin(0.5);
 
     this.subtitleText = this.add
-      .text(width / 2, height / 2 - 86, 'Phaser 3 + TypeScript Temel Proje Hazır', {
+      .text(width / 2, 76, 'İzometrik Zemin (8x8 Tile Grid)', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         fontSize: '15px',
         color: '#94a3b8'
@@ -54,9 +55,9 @@ class MainScene extends Phaser.Scene {
 
   private handleResize(gameSize: Phaser.Structs.Size): void {
     const { width, height } = gameSize;
-    this.centerRect?.setPosition(width / 2, height / 2);
-    this.titleText?.setPosition(width / 2, height / 2 - 120);
-    this.subtitleText?.setPosition(width / 2, height / 2 - 86);
+    this.isoGrid?.setPosition(width / 2, height / 2 + 24);
+    this.titleText?.setPosition(width / 2, 42);
+    this.subtitleText?.setPosition(width / 2, 76);
   }
 
   update(_time: number, _delta: number): void {
