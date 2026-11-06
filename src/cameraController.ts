@@ -1,0 +1,322 @@
+/**
+ * Karahanlı RTS — Harita Kamera ve Ekran Ölçekleme Kontrolcüsü (MapCameraController)
+ *
+ * Genişletilmiş 16x16 izometrik haritanın hem masaüstü hem mobil tarayıcılarda
+ * tamamının dengeli biçimde görülmesini ve akıcı şekilde gezilebilmesini sağlar:
+ * - Ekran boyutuna göre otomatik sığdırma (auto-fit zoom)
+ * - Fare sürükleme / tek parmak dokunmatik kaydırma (pan)
+ * - Fare tekerleği ve iki parmak sıkıştırma (pinch-to-zoom) ile yakınlaştırma
+ * - Ok tuşları / WASD ile klavye kaydırma, Home veya R ile merkeze sıfırlama
+ */
+
+import Phaser from 'phaser';
+
+export interface MapCameraConfig {
+  /** Haritanın toplam dünya piksel genişliği (16x16 için 1024) */
+  mapWidth: number;
+  /** Haritanın toplam dünya piksel yüksekliği (16x16 için ~518) */
+  mapHeight: number;
+  /** Üst başlık / HUD için ayrılan ekran piksel yüksekliği */
+  topUiInset?: number;
+}
+
+const MAX_ZOOM = 1.8;
+const KEYBOARD_PAN_SPEED = 420; // ekran pikseli / saniye
+
+export class MapCameraController {
+  private readonly scene: Phaser.Scene;
+  private readonly camera: Phaser.Cameras.Scene2D.Camera;
+  private readonly mapWidth: number;
+  private readonly mapHeight: number;
+  private readonly topUiInset: number;
+
+  /** Kameranın ekran merkezinde baktığı dünya koordinatı */
+  private lookX = 0;
+  private lookY = 0;
+  private minZoom = 0.5;
+  private defaultZoom = 1;
+  private hasUserAdjustedView = false;
+
+  /** Sürükleme ve iki parmak yakınlaştırma durumu */
+  private isDragging = false;
+  private lastDragX = 0;
+  private lastDragY = 0;
+  private lastPinchDistance = 0;
+
+  /** Opsiyonel klavye tuşları (masaüstü) */
+  private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
+  private wasdKeys?: {
+    W: Phaser.Input.Keyboard.Key;
+    A: Phaser.Input.Keyboard.Key;
+    S: Phaser.Input.Keyboard.Key;
+    D: Phaser.Input.Keyboard.Key;
+    R: Phaser.Input.Keyboard.Key;
+    HOME: Phaser.Input.Keyboard.Key;
+  };
+
+  constructor(
+    scene: Phaser.Scene,
+    camera: Phaser.Cameras.Scene2D.Camera,
+    config: MapCameraConfig
+  ) {
+    this.scene = scene;
+    this.camera = camera;
+    this.mapWidth = config.mapWidth;
+    this.mapHeight = config.mapHeight;
+    this.topUiInset = config.topUiInset ?? 78;
+
+    // Mobil iki parmak pinch-to-zoom için ikinci dokunma noktasını etkinleştir
+    if (scene.input.manager.pointersTotal < 3) {
+      scene.input.addPointer(1);
+    }
+
+    this.setupPointerControls();
+    this.setupKeyboardControls();
+    this.fitToViewport(scene.scale.width, scene.scale.height, true);
+  }
+
+  /**
+   * Ekran boyutu değiştiğinde ölçek sınırlarını günceller.
+   * Oyuncu kamerayı elle kaydırmadıysa haritayı yeniden tam ortalar.
+   */
+  public handleResize(width: number, height: number): void {
+    this.camera.setSize(width, height);
+    this.fitToViewport(width, height, !this.hasUserAdjustedView);
+  }
+
+  /**
+   * Kare bazlı klavye ve iki parmak (pinch) güncellemelerini çalıştırır.
+   */
+  public update(deltaMs: number): void {
+    this.updatePinchZoom();
+    this.updateKeyboardPan(deltaMs);
+  }
+
+  /**
+   * Kamerayı tüm 16x16 haritayı dengeli gösterecek varsayılan konuma sıfırlar.
+   */
+  public resetView(): void {
+    this.hasUserAdjustedView = false;
+    this.fitToViewport(this.scene.scale.width, this.scene.scale.height, true);
+  }
+
+  /**
+   * Mevcut ekran boyutuna göre 16x16 haritanın tamamını sığdıran zoom değerini hesaplar.
+   */
+  private fitToViewport(width: number, height: number, recenter: boolean): void {
+    const safeWidth = Math.max(width - 40, 220);
+    const safeHeight = Math.max(height - this.topUiInset - 28, 180);
+
+    // Ağaç tepeleri ve kenar boşluğu dahil harita sığdırma zarfı
+    const fitScaleX = safeWidth / (this.mapWidth + 32);
+    const fitScaleY = safeHeight / (this.mapHeight + 36);
+    const fullMapFitZoom = Math.min(fitScaleX, fitScaleY);
+
+    // Çok dar dikey telefonlarda bile haritanın tamamını görebilecek kadar uzaklaşmaya izin ver
+    this.minZoom = Phaser.Math.Clamp(Math.min(fullMapFitZoom * 0.92, 0.75), 0.3, 0.9);
+    // Başlangıç yakınlaştırması: geniş ekranda ~1.0x, orta/küçük ekranda tüm haritayı sığdırır
+    this.defaultZoom = Phaser.Math.Clamp(fullMapFitZoom, 0.5, 1.08);
+
+    if (recenter) {
+      this.camera.setZoom(this.defaultZoom);
+      this.lookX = 0;
+      this.lookY = this.getCenteredLookY(this.defaultZoom);
+    } else {
+      const clampedZoom = Phaser.Math.Clamp(this.camera.zoom, this.minZoom, MAX_ZOOM);
+      this.camera.setZoom(clampedZoom);
+    }
+
+    this.applyCameraTransform();
+  }
+
+  /**
+   * Üstteki başlık alanını hesaba katarak haritanın görsel merkezini hesaplar.
+   */
+  private getCenteredLookY(zoom: number): number {
+    return -6 - this.topUiInset / (2 * zoom);
+  }
+
+  private setupPointerControls(): void {
+    const { input } = this.scene;
+
+    input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (this.isTwoFingerGestureActive()) {
+        this.isDragging = false;
+        return;
+      }
+      this.isDragging = true;
+      this.lastDragX = pointer.x;
+      this.lastDragY = pointer.y;
+    });
+
+    input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      if (this.isTwoFingerGestureActive()) {
+        this.isDragging = false;
+        return;
+      }
+      if (!this.isDragging || !pointer.isDown) {
+        return;
+      }
+
+      const dx = pointer.x - this.lastDragX;
+      const dy = pointer.y - this.lastDragY;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+        return;
+      }
+
+      this.lastDragX = pointer.x;
+      this.lastDragY = pointer.y;
+      this.hasUserAdjustedView = true;
+
+      this.lookX -= dx / this.camera.zoom;
+      this.lookY -= dy / this.camera.zoom;
+      this.applyCameraTransform();
+    });
+
+    const stopDragging = (): void => {
+      if (!this.scene.input.activePointer.isDown) {
+        this.isDragging = false;
+      }
+    };
+
+    input.on('pointerup', stopDragging);
+    input.on('pointerupoutside', stopDragging);
+
+    // Masaüstü fare tekerleği ile imleç noktasına doğru yakınlaştırma/uzaklaştırma
+    input.on(
+      'wheel',
+      (
+        pointer: Phaser.Input.Pointer,
+        _gameObjects: Phaser.GameObjects.GameObject[],
+        _deltaX: number,
+        deltaY: number
+      ) => {
+        const zoomFactor = deltaY > 0 ? 0.9 : 1.11;
+        this.zoomAtScreenPoint(this.camera.zoom * zoomFactor, pointer.x, pointer.y);
+      }
+    );
+  }
+
+  private setupKeyboardControls(): void {
+    const keyboard = this.scene.input.keyboard;
+    if (!keyboard) {
+      return;
+    }
+
+    this.cursors = keyboard.createCursorKeys();
+    this.wasdKeys = {
+      W: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.W),
+      A: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A),
+      S: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
+      D: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
+      R: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R),
+      HOME: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.HOME),
+    };
+
+    this.wasdKeys.R.on('down', () => this.resetView());
+    this.wasdKeys.HOME.on('down', () => this.resetView());
+  }
+
+  private updatePinchZoom(): void {
+    const p1 = this.scene.input.pointer1;
+    const p2 = this.scene.input.pointer2;
+
+    if (!p1?.isDown || !p2?.isDown) {
+      this.lastPinchDistance = 0;
+      return;
+    }
+
+    const dist = Phaser.Math.Distance.Between(p1.x, p1.y, p2.x, p2.y);
+    if (dist < 8) {
+      return;
+    }
+
+    if (this.lastPinchDistance > 0) {
+      const ratio = dist / this.lastPinchDistance;
+      if (Math.abs(ratio - 1) > 0.004) {
+        const midX = (p1.x + p2.x) * 0.5;
+        const midY = (p1.y + p2.y) * 0.5;
+        this.zoomAtScreenPoint(this.camera.zoom * ratio, midX, midY);
+      }
+    }
+
+    this.lastPinchDistance = dist;
+  }
+
+  private updateKeyboardPan(deltaMs: number): void {
+    if (!this.cursors || !this.wasdKeys) {
+      return;
+    }
+
+    let dirX = 0;
+    let dirY = 0;
+
+    if (this.cursors.left.isDown || this.wasdKeys.A.isDown) dirX -= 1;
+    if (this.cursors.right.isDown || this.wasdKeys.D.isDown) dirX += 1;
+    if (this.cursors.up.isDown || this.wasdKeys.W.isDown) dirY -= 1;
+    if (this.cursors.down.isDown || this.wasdKeys.S.isDown) dirY += 1;
+
+    if (dirX === 0 && dirY === 0) {
+      return;
+    }
+
+    const len = Math.hypot(dirX, dirY);
+    const stepWorld = (KEYBOARD_PAN_SPEED * (deltaMs / 1000)) / this.camera.zoom;
+
+    this.hasUserAdjustedView = true;
+    this.lookX += (dirX / len) * stepWorld;
+    this.lookY += (dirY / len) * stepWorld;
+    this.applyCameraTransform();
+  }
+
+  /**
+   * Belirtilen ekran noktasının altındaki dünya koordinatını sabit tutarak yakınlaştırır.
+   */
+  private zoomAtScreenPoint(targetZoom: number, screenX: number, screenY: number): void {
+    const oldZoom = this.camera.zoom;
+    const newZoom = Phaser.Math.Clamp(targetZoom, this.minZoom, MAX_ZOOM);
+    if (Math.abs(newZoom - oldZoom) < 0.0005) {
+      return;
+    }
+
+    const offsetX = screenX - this.camera.width * 0.5;
+    const offsetY = screenY - this.camera.height * 0.5;
+
+    const worldBeforeX = this.lookX + offsetX / oldZoom;
+    const worldBeforeY = this.lookY + offsetY / oldZoom;
+
+    this.camera.setZoom(newZoom);
+    this.lookX = worldBeforeX - offsetX / newZoom;
+    this.lookY = worldBeforeY - offsetY / newZoom;
+    this.hasUserAdjustedView = true;
+
+    this.applyCameraTransform();
+  }
+
+  private isTwoFingerGestureActive(): boolean {
+    return Boolean(this.scene.input.pointer1?.isDown && this.scene.input.pointer2?.isDown);
+  }
+
+  /**
+   * Kameranın harita sınırlarından tamamen kopmasını önleyerek merkezi günceller.
+   */
+  private applyCameraTransform(): void {
+    const maxOffsetX = this.mapWidth * 0.52;
+    const maxOffsetY = this.mapHeight * 0.56;
+    const centerBaseY = this.getCenteredLookY(this.camera.zoom);
+
+    this.lookX = Phaser.Math.Clamp(this.lookX, -maxOffsetX, maxOffsetX);
+    this.lookY = Phaser.Math.Clamp(
+      this.lookY,
+      centerBaseY - maxOffsetY,
+      centerBaseY + maxOffsetY
+    );
+
+    this.camera.centerOn(this.lookX, this.lookY);
+  }
+
+  public destroy(): void {
+    this.wasdKeys?.R.removeAllListeners();
+    this.wasdKeys?.HOME.removeAllListeners();
+  }
+}

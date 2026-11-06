@@ -1,7 +1,7 @@
 /**
  * Karahanlı RTS — İzometrik Çimen Arazi (Tile) Sistemi
  * 64×32 piksel kesintisiz (seamless) izometrik çimen karosu dokularını kullanarak
- * 8×8 haritayı boşluksuz, tekrarlayan desenlerden arındırılmış ve mobil uyumlu
+ * 16×16 haritayı boşluksuz, tekrarlayan desenlerden arındırılmış ve mobil uyumlu
  * (tek WebGL draw call) biçimde oluşturur.
  */
 
@@ -11,7 +11,7 @@ import {
   fbm2D,
   GRASS_TILE_HEIGHT,
   GRASS_TILE_WIDTH,
-  hash2D
+  hash2D,
 } from './grassTexture';
 
 export interface IsoGridOptions {
@@ -64,8 +64,56 @@ export class IsoGrid {
 
     return {
       x: rawX - centerOffsetX,
-      y: rawY - centerOffsetY
+      y: rawY - centerOffsetY,
     };
+  }
+
+  /**
+   * Verilen (col, row) karosunun harita sınırları içinde olup olmadığını döndürür.
+   */
+  public isInBounds(col: number, row: number): boolean {
+    return col >= 0 && col < this.cols && row >= 0 && row < this.rows;
+  }
+
+  /**
+   * Dünya koordinatını (worldX, worldY) kesirli izometrik karo koordinatına (col, row) çevirir.
+   */
+  public worldToTile(worldX: number, worldY: number): { col: number; row: number } {
+    const halfW = this.tileWidth / 2;
+    const halfH = this.tileHeight / 2;
+    const centerOffsetX = ((this.cols - this.rows) * this.tileWidth) / 4;
+    const centerOffsetY = ((this.cols + this.rows - 2) * this.tileHeight) / 4;
+
+    const rawX = worldX - this.mapX + centerOffsetX;
+    const rawY = worldY - this.mapY + centerOffsetY;
+
+    return {
+      col: (rawY / halfH + rawX / halfW) * 0.5,
+      row: (rawY / halfH - rawX / halfW) * 0.5,
+    };
+  }
+
+  /** Yatay eksendeki karo sayısını döndürür. */
+  public getCols(): number {
+    return this.cols;
+  }
+
+  /** Dikey eksendeki karo sayısını döndürür. */
+  public getRows(): number {
+    return this.rows;
+  }
+
+  /** Haritanın toplam dünya piksel genişliğini ve yüksekliğini döndürür. */
+  public getWorldSize(): { width: number; height: number } {
+    return {
+      width: (this.cols + this.rows) * (this.tileWidth / 2),
+      height: (this.cols + this.rows) * (this.tileHeight / 2) + 6,
+    };
+  }
+
+  /** Zemini çizen Phaser Image nesnesini döndürür (kamera filtreleme vb. için). */
+  public getTerrainImage(): Phaser.GameObjects.Image | undefined {
+    return this.terrainImage;
   }
 
   /**
@@ -81,13 +129,13 @@ export class IsoGrid {
 
     return {
       x: topX + (u - v) * halfW,
-      y: topY + (u + v) * halfH
+      y: topY + (u + v) * halfH,
     };
   }
 
   /**
    * 64×32 çimen dokusu atlasını üretir, komşu tekrarını önleyen varyant matrisiyle
-   * 8×8 haritanın tamamına uygular ve tek bir GPU dokusu olarak sahneye yerleştirir.
+   * 16×16 haritanın tamamına uygular ve tek bir GPU dokusu olarak sahneye yerleştirir.
    */
   public draw(): void {
     const atlas = ensureGrassTileAtlas(this.scene, this.seed);
@@ -132,10 +180,10 @@ export class IsoGrid {
     const imageData = ctx.createImageData(canvasWidth, canvasHeight);
     const out = imageData.data;
 
-    // 1) Tekrarlayan desenleri önlemek için komşu karoların aynı varyantı kullanmadığı 8×8 varyant tablosu
+    // 1) Tekrarlayan desenleri önlemek için komşu karoların aynı varyantı kullanmadığı 16×16 varyant tablosu
     const variantGrid = this.buildNonRepeatingVariantGrid(atlas.variantCount);
 
-    // 2) Her bir 8×8 karoya karşılık gelen 64×32 piksel çimen dokusunu tam sayı kafes koordinatlarına yerleştir
+    // 2) Her bir 16×16 karoya karşılık gelen 64×32 piksel çimen dokusunu tam sayı kafes koordinatlarına yerleştir
     const topApexX = Math.round(originX + topCorner.x);
     const topApexY = Math.round(originY + topCorner.y);
 
@@ -188,7 +236,7 @@ export class IsoGrid {
 
     ctx.putImageData(imageData, 0, 0);
 
-    // 4) Ön kenar toprak kesiti (skirt), hafif 8×8 taktik ızgara izi ve dış sınır yumuşatması
+    // 4) Ön kenar toprak kesiti (skirt), hafif 16×16 taktik ızgara izi ve dış sınır yumuşatması
     ctx.save();
     ctx.globalCompositeOperation = 'destination-over';
     this.drawTerrainSkirt(
@@ -232,7 +280,7 @@ export class IsoGrid {
     if (this.terrainImage) {
       this.terrainImage.setTexture(this.mapTextureKey);
     } else {
-      this.terrainImage = this.scene.add.image(0, 0, this.mapTextureKey);
+      this.terrainImage = this.scene.add.image(this.mapX, this.mapY, this.mapTextureKey);
     }
 
     this.terrainImage.setOrigin(originX / canvasWidth, originY / canvasHeight);
@@ -252,7 +300,7 @@ export class IsoGrid {
     const local = this.gridToIso(col, row);
     return {
       x: Math.round(this.mapX + local.x),
-      y: Math.round(this.mapY + local.y)
+      y: Math.round(this.mapY + local.y),
     };
   }
 
@@ -263,6 +311,17 @@ export class IsoGrid {
   public getTileDepth(col: number, row: number, zOffset = 0): number {
     const local = this.gridToIso(col, row);
     return 1000 + local.y + col * 0.01 + zOffset;
+  }
+
+  /**
+   * Sahne kapatılırken oluşturulan nesne ve dokuyu serbest bırakır.
+   */
+  public destroy(): void {
+    this.terrainImage?.destroy();
+    this.terrainImage = undefined;
+    if (this.scene.textures.exists(this.mapTextureKey)) {
+      this.scene.textures.remove(this.mapTextureKey);
+    }
   }
 
   /**
@@ -310,7 +369,7 @@ export class IsoGrid {
 
   /**
    * 64×32 karoların kesintisiz birleştiği yüzey üzerine harita ölçeğinde hafif güneş/gölge
-   * ve bozkır ton geçişleri uygular; böylece 8×8 haritada yapay tekrar hissi oluşmaz.
+   * ve bozkır ton geçişleri uygular; böylece 16×16 haritada yapay tekrar hissi oluşmaz.
    */
   private applyWorldMeadowAtmosphere(
     out: Uint8ClampedArray,
@@ -344,7 +403,7 @@ export class IsoGrid {
           0.28;
         const warmZone = fbm2D(u * 0.62 + 21.5, v * 0.62 + 14.2, 2, this.seed + 787);
 
-        const lightFactor = 0.90 + meadowWave * 0.19 + sunSlope;
+        const lightFactor = 0.9 + meadowWave * 0.19 + sunSlope;
 
         // Dış kenarlarda yumuşak çerçeveleme ve kenar anti-aliasing
         const borderUV = Math.min(u, this.cols - u, v, this.rows - v);

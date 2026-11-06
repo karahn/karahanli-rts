@@ -1,40 +1,51 @@
 /**
- * Karahanlı RTS — Orman ve Odun Kaynağı Yönetim Sistemi
+ * Karahanlı RTS — Küçük Orman ve Odun Kaynağı Altyapısı (ForestSystem)
  *
- * Kayın ('kayin') ve çam ('cam') ağaçlarını 8×8 izometrik harita üzerinde
- * derinlik sıralamalı (depth-sorted) olarak yöneten ve ileride eklenecek
- * odun toplama mekaniği için kaynak verilerini (id, tür, odun miktarı, koordinat)
- * tutan sade, genişletilebilir altyapı.
+ * 16x16 harita üzerindeki kayın ve çam ağaçlarını odun kaynağı düğümleri
+ * (TreeResourceNode) olarak yönetir. Her ağaç benzersiz kimlik, tür, ızgara
+ * koordinatı ve odun miktarı (100) bilgisiyle tutulur; ileride köylülerin
+ * odun toplaması ve tükenen ağaçların haritadan kaldırılması için hazırdır.
  */
 
 import Phaser from 'phaser';
 import { IsoGrid } from './isoGrid';
 
+/** Desteklenen ağaç türleri */
 export type TreeType = 'kayin' | 'cam';
 
-export interface TileCoord {
-  col: number;
-  row: number;
+/** Her ağacın başlangıç odun kaynağı miktarı */
+export const INITIAL_WOOD_AMOUNT = 100;
+
+interface TreeVisualSpec {
+  textureKey: string;
+  assetPath: string;
+  /** Kök tabanının yatay merkez oranı (0..1) */
+  originX: number;
+  /** Köklerin çimene temas ettiği dikey taban oranı (0..1) */
+  originY: number;
+  defaultScale: number;
 }
 
-/**
- * Odun toplanabilir ağaç kaynak nesnesi veri modeli.
- */
-export interface TreeResourceNode {
-  /** Kaynak nesnesi benzersiz kimliği */
+const TREE_SPECS: Record<TreeType, TreeVisualSpec> = {
+  kayin: {
+    textureKey: 'tree_kayin',
+    assetPath: 'assets/sprites/steppe_tree.png',
+    originX: 111 / 230,
+    originY: 182 / 202,
+    defaultScale: 0.49,
+  },
+  cam: {
+    textureKey: 'tree_cam',
+    assetPath: 'assets/sprites/pine_tree.png',
+    originX: 65 / 129,
+    originY: 207 / 228,
+    defaultScale: 0.49,
+  },
+};
+
+/** Haritaya yerleştirilecek bir ağacın başlangıç tanımı */
+export interface TreeSpawnConfig {
   id: string;
-  /** Ağaç türü: kayın veya çam */
-  treeType: TreeType;
-  /** Mevcut odun miktarı (başlangıçta 100) */
-  woodAmount: number;
-  /** Başlangıç / maksimum odun kapasitesi */
-  maxWoodAmount: number;
-  /** İzometrik harita karo koordinatı (col, row) */
-  tile: TileCoord;
-}
-
-export interface AddTreeOptions {
-  id?: string;
   treeType: TreeType;
   col: number;
   row: number;
@@ -42,89 +53,36 @@ export interface AddTreeOptions {
   scale?: number;
 }
 
-interface TreeVisualSpec {
-  textureKey: string;
-  assetPath: string;
-  originX: number;
-  originY: number;
-  defaultScale: number;
+/** Sahnedeki canlı bir ağaç/odun kaynağı düğümü */
+export interface TreeResourceNode {
+  readonly id: string;
+  readonly treeType: TreeType;
+  woodAmount: number;
+  readonly maxWoodAmount: number;
+  readonly tile: { col: number; row: number };
+  readonly scale: number;
+  readonly sprite: Phaser.GameObjects.Image;
 }
 
-interface ManagedTreeEntry {
-  node: TreeResourceNode;
-  sprite: Phaser.GameObjects.Image;
-}
-
-export const INITIAL_WOOD_AMOUNT = 100;
-
 /**
- * Ağaç türlerine göre kalibre edilmiş kök tabanı origin ve doku tanımları.
+ * 16x16 haritanın kuzeybatı iç çayırında doğal bir koruluk (pocket woodland) yerleşimi:
+ * - 2 kayın + 2 çam ağacı üst kenara duvar gibi dizilmeden organik üçgen/elmas küme oluşturur
+ * - Ağaçların arasında köylülerin rahatça yürüyebileceği 1-2 karoluk doğal açıklıklar bulunur
+ * - Haritanın geniş orta, doğu ve güney düzlükleri (col 6..15, row 3..15) tamamen açıktır
  */
-const TREE_VISUAL_SPECS: Record<TreeType, TreeVisualSpec> = {
-  kayin: {
-    textureKey: 'tree-kayin',
-    assetPath: 'assets/sprites/steppe_tree.png',
-    // 230×202 piksel kayın sprite'ı 3B kök taban merkezi: (111, 182)
-    originX: 111 / 230,
-    originY: 182 / 202,
-    defaultScale: 0.48
-  },
-  cam: {
-    textureKey: 'tree-cam',
-    assetPath: 'assets/sprites/pine_tree.png',
-    // 129×228 piksel çam sprite'ı 3B kök taban merkezi: (65, 207)
-    originX: 65 / 129,
-    originY: 207 / 228,
-    defaultScale: 0.48
-  }
-};
-
-/**
- * Başlangıçtaki 4 ağaçlık doğal küçük orman yerleşimi (2 kayın + 2 çam).
- * Haritanın orta, doğu ve güney çayır alanlarını açık bırakacak ve
- * ağaçlar birbirinin üstüne binmeyecek şekilde konumlandırılmıştır.
- */
-export const INITIAL_FOREST_LAYOUT: ReadonlyArray<AddTreeOptions> = [
-  {
-    id: 'wood_cam_1',
-    treeType: 'cam',
-    col: 2,
-    row: 1,
-    woodAmount: INITIAL_WOOD_AMOUNT,
-    scale: 0.48
-  },
-  {
-    id: 'wood_kayin_1',
-    treeType: 'kayin',
-    col: 1,
-    row: 3,
-    woodAmount: INITIAL_WOOD_AMOUNT,
-    scale: 0.48
-  },
-  {
-    id: 'wood_kayin_2',
-    treeType: 'kayin',
-    col: 4,
-    row: 1,
-    woodAmount: INITIAL_WOOD_AMOUNT,
-    scale: 0.46
-  },
-  {
-    id: 'wood_cam_2',
-    treeType: 'cam',
-    col: 1,
-    row: 5,
-    woodAmount: INITIAL_WOOD_AMOUNT,
-    scale: 0.45
-  }
+export const INITIAL_FOREST_LAYOUT: readonly TreeSpawnConfig[] = [
+  { id: 'wood_cam_1', treeType: 'cam', col: 4, row: 4, scale: 0.5 },
+  { id: 'wood_kayin_1', treeType: 'kayin', col: 2, row: 6, scale: 0.5 },
+  { id: 'wood_cam_2', treeType: 'cam', col: 5, row: 7, scale: 0.47 },
+  { id: 'wood_kayin_2', treeType: 'kayin', col: 3, row: 9, scale: 0.48 },
 ];
 
 export class ForestSystem {
   private readonly scene: Phaser.Scene;
   private readonly isoGrid: IsoGrid;
-  private readonly treesById = new Map<string, ManagedTreeEntry>();
-  private readonly idByTileKey = new Map<string, string>();
-  private nextAutoId = 1;
+  private readonly nodesById = new Map<string, TreeResourceNode>();
+  private readonly nodesByTile = new Map<string, TreeResourceNode>();
+  private readonly ignoredCameras = new Set<Phaser.Cameras.Scene2D.Camera>();
 
   constructor(scene: Phaser.Scene, isoGrid: IsoGrid) {
     this.scene = scene;
@@ -132,139 +90,137 @@ export class ForestSystem {
   }
 
   /**
-   * Orman sisteminde kullanılan ağaç görsellerini Phaser sahnesine yükler.
+   * Kayın ve çam ağacı görsellerini Phaser önbelleğine yükler.
    */
   public static preload(scene: Phaser.Scene): void {
-    for (const spec of Object.values(TREE_VISUAL_SPECS)) {
+    for (const spec of Object.values(TREE_SPECS)) {
       scene.load.image(spec.textureKey, spec.assetPath);
     }
   }
 
   /**
-   * Verilen ağaç listesini tek seferde sahneye ekler.
+   * Verilen ağaç listesini (varsayılan: 2 kayın + 2 çam koruluğu) haritaya yerleştirir.
    */
-  public populate(definitions: ReadonlyArray<AddTreeOptions>): TreeResourceNode[] {
-    const created: TreeResourceNode[] = [];
-    for (const def of definitions) {
-      const node = this.addTree(def);
-      if (node) {
-        created.push(node);
-      }
+  public populate(layout: readonly TreeSpawnConfig[] = INITIAL_FOREST_LAYOUT): void {
+    for (const item of layout) {
+      this.addTree(item);
     }
-    return created;
   }
 
   /**
-   * Haritaya yeni bir ağaç kaynak nesnesi ekler.
-   * Aynı kimlik veya dolu bir karo verilirse mevcut ağacı bozmamak için null döndürür.
+   * Tek bir ağacı izometrik karoya yerleştirir ve odun kaynağı olarak kaydeder.
    */
-  public addTree(options: AddTreeOptions): TreeResourceNode | null {
-    const tileKey = this.toTileKey(options.col, options.row);
-    if (this.idByTileKey.has(tileKey)) {
-      return null;
+  public addTree(config: TreeSpawnConfig): TreeResourceNode {
+    const key = this.tileKey(config.col, config.row);
+    if (this.nodesById.has(config.id)) {
+      throw new Error(`Ağaç kimliği zaten kullanımda: ${config.id}`);
+    }
+    if (this.nodesByTile.has(key)) {
+      throw new Error(`(${config.col}, ${config.row}) karosunda zaten bir ağaç bulunuyor.`);
     }
 
-    const id = options.id ?? this.generateUniqueId(options.treeType);
-    if (this.treesById.has(id)) {
-      return null;
-    }
+    const spec = TREE_SPECS[config.treeType];
+    const worldPos = this.isoGrid.tileToWorld(config.col, config.row);
+    const scale = config.scale ?? spec.defaultScale;
+    const initialWood = config.woodAmount ?? INITIAL_WOOD_AMOUNT;
 
-    const spec = TREE_VISUAL_SPECS[options.treeType];
-    const initialWood = options.woodAmount ?? INITIAL_WOOD_AMOUNT;
+    const sprite = this.scene.add.image(worldPos.x, worldPos.y, spec.textureKey);
+    sprite.setOrigin(spec.originX, spec.originY);
+    sprite.setScale(scale);
+    sprite.setDepth(this.isoGrid.getTileDepth(config.col, config.row));
+
+    for (const cam of this.ignoredCameras) {
+      cam.ignore(sprite);
+    }
 
     const node: TreeResourceNode = {
-      id,
-      treeType: options.treeType,
+      id: config.id,
+      treeType: config.treeType,
       woodAmount: initialWood,
       maxWoodAmount: initialWood,
-      tile: {
-        col: options.col,
-        row: options.row
-      }
+      tile: { col: config.col, row: config.row },
+      scale,
+      sprite,
     };
 
-    const worldPos = this.isoGrid.tileToWorld(options.col, options.row);
-    const sprite = this.scene.add
-      .image(worldPos.x, worldPos.y, spec.textureKey)
-      .setOrigin(spec.originX, spec.originY)
-      .setScale(options.scale ?? spec.defaultScale)
-      .setDepth(this.isoGrid.getTileDepth(options.col, options.row));
-
-    sprite.setData('resourceId', node.id);
-    sprite.setData('resourceType', 'wood');
-
-    this.treesById.set(node.id, { node, sprite });
-    this.idByTileKey.set(tileKey, node.id);
-
+    this.nodesById.set(node.id, node);
+    this.nodesByTile.set(key, node);
     return node;
   }
 
   /**
-   * Kaynak nesnesi kimliğine (id) göre ağacı haritadan ve veri yapısından kaldırır.
+   * Belirtilen kameranın (ör. sabit arayüz/HUD kamerası) ağaç sprite'larını
+   * çizmemesini sağlar; sonradan eklenecek ağaçlara da otomatik uygulanır.
+   */
+  public ignoreOnCamera(camera: Phaser.Cameras.Scene2D.Camera): void {
+    this.ignoredCameras.add(camera);
+    for (const node of this.nodesById.values()) {
+      camera.ignore(node.sprite);
+    }
+  }
+
+  /**
+   * Kimliği verilen ağacı sahneden ve veri yapısından güvenli şekilde kaldırır.
+   * (İleride odun miktarı 0'a düştüğünde doğrudan çağrılabilir.)
    */
   public removeTree(id: string): boolean {
-    const entry = this.treesById.get(id);
-    if (!entry) {
+    const node = this.nodesById.get(id);
+    if (!node) {
       return false;
     }
 
-    const tileKey = this.toTileKey(entry.node.tile.col, entry.node.tile.row);
-    this.idByTileKey.delete(tileKey);
-    this.treesById.delete(id);
-    entry.sprite.destroy();
+    node.sprite.destroy();
+    this.nodesById.delete(id);
+    this.nodesByTile.delete(this.tileKey(node.tile.col, node.tile.row));
     return true;
   }
 
   /**
-   * Verilen karo koordinatındaki ağacı kaldırır.
+   * Verilen karodaki ağacı kaldırır.
    */
   public removeTreeAt(col: number, row: number): boolean {
-    const id = this.idByTileKey.get(this.toTileKey(col, row));
-    return id ? this.removeTree(id) : false;
+    const node = this.getTreeAt(col, row);
+    return node ? this.removeTree(node.id) : false;
   }
 
-  /**
-   * Kimliğe göre tek bir ağaç kaynak verisini döndürür.
-   */
+  /** Kimliğe göre ağaç kaynağını döner. */
   public getTree(id: string): TreeResourceNode | undefined {
-    return this.treesById.get(id)?.node;
+    return this.nodesById.get(id);
   }
 
-  /**
-   * Karo koordinatına göre ağaç kaynak verisini döndürür.
-   */
+  /** Karo koordinatına göre ağaç kaynağını döner. */
   public getTreeAt(col: number, row: number): TreeResourceNode | undefined {
-    const id = this.idByTileKey.get(this.toTileKey(col, row));
-    return id ? this.treesById.get(id)?.node : undefined;
+    return this.nodesByTile.get(this.tileKey(col, row));
   }
 
-  /**
-   * Haritadaki tüm aktif ağaç kaynak nesnelerinin listesini döndürür.
-   */
+  /** Haritadaki tüm aktif ağaç kaynaklarını döner. */
   public getAllTrees(): TreeResourceNode[] {
-    return Array.from(this.treesById.values(), (entry) => entry.node);
+    return Array.from(this.nodesById.values());
   }
 
   /**
-   * Ekran yeniden boyutlandırıldığında tüm ağaçların dünya koordinatlarını ve derinliklerini günceller.
+   * Harita merkezi (IsoGrid) taşındığında tüm ağaçların dünya konumlarını
+   * ve izometrik derinliklerini yeniden senkronize eder.
    */
   public syncPositions(): void {
-    for (const { node, sprite } of this.treesById.values()) {
-      const worldPos = this.isoGrid.tileToWorld(node.tile.col, node.tile.row);
-      sprite.setPosition(worldPos.x, worldPos.y);
-      sprite.setDepth(this.isoGrid.getTileDepth(node.tile.col, node.tile.row));
+    for (const node of this.nodesById.values()) {
+      const pos = this.isoGrid.tileToWorld(node.tile.col, node.tile.row);
+      node.sprite.setPosition(pos.x, pos.y);
+      node.sprite.setDepth(this.isoGrid.getTileDepth(node.tile.col, node.tile.row));
     }
   }
 
-  private toTileKey(col: number, row: number): string {
+  /** Tüm ağaç nesnelerini temizler. */
+  public destroy(): void {
+    for (const node of this.nodesById.values()) {
+      node.sprite.destroy();
+    }
+    this.nodesById.clear();
+    this.nodesByTile.clear();
+    this.ignoredCameras.clear();
+  }
+
+  private tileKey(col: number, row: number): string {
     return `${col},${row}`;
-  }
-
-  private generateUniqueId(treeType: TreeType): string {
-    let candidate = `wood_${treeType}_${this.nextAutoId++}`;
-    while (this.treesById.has(candidate)) {
-      candidate = `wood_${treeType}_${this.nextAutoId++}`;
-    }
-    return candidate;
   }
 }
