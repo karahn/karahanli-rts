@@ -3,10 +3,10 @@
  *
  * Phaser 3 + TypeScript + Vite tabanlı 2D gerçek zamanlı strateji oyunu.
  * 16x16 dikişsiz izometrik çimen haritayı, doğal koruluk yerleşimindeki
- * 2 kayın + 2 çam odun kaynağını (her biri 100 odun), ortak ahşap odun deposunu,
- * ahşap ağırlıklı Eski Türk Hükümdar Konağı (Town Hall) yapısını, Celtic Kings tarzı
- * bina içi garnizon sistemini ve Age of Empires / Celtic Kings tarzı birleşik alt
- * bilgi panelini sahnede çalıştırır.
+ * 2 kayın + 2 çam odun kaynağını (her biri 100 odun), gerçekçi ahşap direkli ve
+ * çatılı ortak odun deposunu, kurt armalı Eski Türk Hükümdar Konağı (Town Hall)
+ * yapısını, Celtic Kings tarzı bina içi garnizon sistemini ve yakın plan karakter
+ * portreli birleşik alt bilgi panelini sahnede çalıştırır.
  */
 
 import Phaser from 'phaser';
@@ -48,8 +48,10 @@ class MainScene extends Phaser.Scene {
 
   public preload(): void {
     ForestSystem.preload(this);
+    WoodDepot.preload(this);
     TownHall.preload(this);
     VillagerSystem.preload(this);
+    BottomInfoPanel.preload(this);
   }
 
   public create(): void {
@@ -68,10 +70,10 @@ class MainScene extends Phaser.Scene {
     this.forestSystem = new ForestSystem(this, this.isoGrid);
     this.forestSystem.populate();
 
-    // Ortak odun deposu (col: 7, row: 6)
+    // Ahşap direkli, çatılı ve istiflenmiş kütük yığınlı ortak odun deposu (col: 6, row: 5)
     this.woodDepot = new WoodDepot(this, this.isoGrid);
 
-    // Ahşap ağırlıklı Eski Türk Hükümdar Konağı — Town Hall (cols: 9..11, rows: 5..7)
+    // Kurt armalı Eski Türk Hükümdar Konağı — Town Hall (cols: 9..11, rows: 5..7)
     this.townHall = new TownHall(this, this.isoGrid, this.woodDepot);
 
     // Kamera kontrolcüsü (üst kaynak çubuğu ve alt bilgi paneli boşluklarıyla dengeli)
@@ -94,7 +96,7 @@ class MainScene extends Phaser.Scene {
     );
     this.villagerSystem.spawnInitialVillagers();
 
-    // Age of Empires & Celtic Kings tarzı birleşik alt bilgi ve yönetim paneli
+    // Age of Empires & Celtic Kings tarzı yakın plan portreli alt bilgi ve yönetim paneli
     this.bottomPanel = new BottomInfoPanel(this, {
       onToggleTouchBoxMode: () => {
         this.villagerSystem?.toggleTouchBoxSelectMode();
@@ -227,9 +229,10 @@ class MainScene extends Phaser.Scene {
     const unitStatus = this.villagerSystem.getHudStatus();
     const thSnap = this.townHall.getHudSnapshot();
 
+    // Garnizondaki birim sayısı üst şeritte gösterilmez; yalnızca Town Hall seçildiğinde alt panelde yer alır
     const topLine =
       `Toplam Odun: ${unitStatus.totalStoredWood}   •   ` +
-      `Nüfus: ${unitStatus.totalVillagersCount} (Sahada: ${unitStatus.fieldVillagersCount} | Binada: ${thSnap.garrison.totalCount})   •   ` +
+      `Nüfus: ${unitStatus.totalVillagersCount} Köylü   •   ` +
       `Orman: ${unitStatus.remainingTreesCount} Ağaç`;
 
     if (force || topLine !== this.lastTopResourceLine) {

@@ -3,11 +3,14 @@
  *
  * Age of Empires ve Celtic Kings tarzında ekranın alt bölümünde yer alan,
  * kamera yakınlaştırmasından bağımsız (HudCamera) bilgi ve komut paneli:
- * - Tekli birim seçildiğinde: Ad, tür, can/maksimum can, saldırı, savunma,
- *   açlık/tokluk durumu (geliştirilme notuyla), taşınan kaynak ve mevcut görev
- * - Çoklu birim seçildiğinde: Seçili birim sayısı, grup özeti ve tıklanabilir birim simgeleri
- * - Town Hall seçildiğinde: Aynı arayüz düzeninde bina bilgileri, köylü üretimi (20 Odun, 5 sn)
- *   ve içerideki birimlerin simgeleri, sayıları, "Tek Çıkar" ve "Tümünü Çıkar" butonları
+ * - Tekli birim seçildiğinde: Karahanlı dönemi kıyafetlerine uygun yakın plan
+ *   karakter portresi, ad, tür, can/maksimum can, saldırı, savunma, açlık/tokluk
+ *   durumu, taşınan kaynak ve mevcut görev
+ * - Çoklu birim seçildiğinde: Seçili birim sayısı, grup özeti ve tıklanabilir
+ *   yakın plan karakter portre kartları
+ * - Town Hall seçildiğinde: Aynı arayüz düzeninde bina portresi, köylü üretimi
+ *   (20 Odun, 5 sn) ve yalnızca bu panelde görünen garnizon birim sayıları,
+ *   türleri, yakın plan portre kartları, "Tek Çıkar" ve "Tümünü Çıkar" butonları
  */
 
 import Phaser from 'phaser';
@@ -18,6 +21,14 @@ import { VillagerHudStatus } from './villagerSystem';
 const PANEL_DEPTH = 5010;
 
 export const BOTTOM_DOCK_TOTAL_HEIGHT = 158;
+
+const VILLAGER_PORTRAIT_KEYS = [
+  'portrait_villager_1',
+  'portrait_villager_2',
+  'portrait_villager_3',
+] as const;
+
+const TOWN_HALL_PORTRAIT_KEY = 'portrait_town_hall';
 
 export interface BottomPanelCallbacks {
   onToggleTouchBoxMode: () => void;
@@ -42,9 +53,11 @@ export class BottomInfoPanel {
   private readonly scene: Phaser.Scene;
   private readonly callbacks: BottomPanelCallbacks;
 
-  private readonly rootBg: Phaser.GameObjects.Graphics;
-  private readonly iconGraphics: Phaser.GameObjects.Graphics;
   private readonly quickBarBg: Phaser.GameObjects.Graphics;
+  private readonly rootBg: Phaser.GameObjects.Graphics;
+  private readonly mainPortraitImage: Phaser.GameObjects.Image;
+  private readonly slotPortraitImages: Phaser.GameObjects.Image[] = [];
+  private readonly iconOverlayGraphics: Phaser.GameObjects.Graphics;
 
   private readonly quickLabels: Phaser.GameObjects.Text[] = [];
   private readonly headerTitle: Phaser.GameObjects.Text;
@@ -75,7 +88,24 @@ export class BottomInfoPanel {
 
     this.quickBarBg = scene.add.graphics().setDepth(PANEL_DEPTH);
     this.rootBg = scene.add.graphics().setDepth(PANEL_DEPTH + 1);
-    this.iconGraphics = scene.add.graphics().setDepth(PANEL_DEPTH + 3);
+
+    this.mainPortraitImage = scene.add
+      .image(0, 0, VILLAGER_PORTRAIT_KEYS[0])
+      .setOrigin(0, 0)
+      .setDepth(PANEL_DEPTH + 2)
+      .setVisible(false);
+
+    for (let i = 0; i < MAX_ICON_SLOTS; i += 1) {
+      this.slotPortraitImages.push(
+        scene.add
+          .image(0, 0, VILLAGER_PORTRAIT_KEYS[i % VILLAGER_PORTRAIT_KEYS.length])
+          .setOrigin(0, 0)
+          .setDepth(PANEL_DEPTH + 2)
+          .setVisible(false)
+      );
+    }
+
+    this.iconOverlayGraphics = scene.add.graphics().setDepth(PANEL_DEPTH + 3);
 
     const fontStack =
       'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
@@ -191,6 +221,8 @@ export class BottomInfoPanel {
             fontSize: '9.5px',
             fontStyle: 'bold',
             color: '#f8fafc',
+            stroke: '#020617',
+            strokeThickness: 2.5,
           })
           .setOrigin(0.5, 1)
           .setDepth(PANEL_DEPTH + 5)
@@ -201,11 +233,21 @@ export class BottomInfoPanel {
     scene.input.on('pointerdown', this.handlePointerDown, this);
   }
 
+  /** Yakın plan Karahanlı köylü ve Town Hall portrelerini önbelleğe yükler. */
+  public static preload(scene: Phaser.Scene): void {
+    scene.load.image(VILLAGER_PORTRAIT_KEYS[0], 'assets/portraits/villager_1.png');
+    scene.load.image(VILLAGER_PORTRAIT_KEYS[1], 'assets/portraits/villager_2.png');
+    scene.load.image(VILLAGER_PORTRAIT_KEYS[2], 'assets/portraits/villager_3.png');
+    scene.load.image(TOWN_HALL_PORTRAIT_KEY, 'assets/portraits/town_hall.png');
+  }
+
   public getGameObjects(): Phaser.GameObjects.GameObject[] {
     return [
       this.quickBarBg,
       this.rootBg,
-      this.iconGraphics,
+      this.mainPortraitImage,
+      ...this.slotPortraitImages,
+      this.iconOverlayGraphics,
       ...this.quickLabels,
       this.headerTitle,
       this.headerSubtitle,
@@ -258,9 +300,9 @@ export class BottomInfoPanel {
     this.lastRenderSignature = sig;
 
     this.clickableZones = [];
-    this.hideTransientTexts();
+    this.hideTransientVisuals();
     this.rootBg.clear();
-    this.iconGraphics.clear();
+    this.iconOverlayGraphics.clear();
     this.quickBarBg.clear();
 
     const isCompact = screenWidth < 680;
@@ -272,7 +314,7 @@ export class BottomInfoPanel {
 
     this.panelHitRect.setTo(panelX, panelY, panelW, panelH);
 
-    // 1) Üst hızlı kontrol şeridi (Kutu Seç, Tümünü Seç, Town Hall, Bırak)
+    // 1) Üst hızlı kontrol şeridi (Kutu Seç, Tümünü Seç, Town Hall, Bırak — garnizon sayısı göstermez)
     this.renderQuickToolbar(
       screenWidth,
       panelY - 31,
@@ -363,10 +405,6 @@ export class BottomInfoPanel {
     isCompact: boolean
   ): void {
     const anySelected = unitStatus.selectedCount > 0 || townHallSnap.selected;
-    const garrisonBadge =
-      townHallSnap.garrison.totalCount > 0
-        ? ` (${townHallSnap.garrison.totalCount})`
-        : '';
 
     const items: Array<{
       label: string;
@@ -389,7 +427,7 @@ export class BottomInfoPanel {
         action: () => this.callbacks.onSelectAllUnits(),
       },
       {
-        label: `Town Hall${garrisonBadge}`,
+        label: 'Town Hall',
         active: townHallSnap.selected,
         dim: false,
         action: () => this.callbacks.onSelectTownHall(),
@@ -470,15 +508,17 @@ export class BottomInfoPanel {
     unit: NonNullable<VillagerHudStatus['selectedUnit']>,
     isCompact: boolean
   ): void {
-    // Sol portre kartı + can çubuğu
+    // Sol yakın plan karakter portresi + can çubuğu
     const portraitX = px + 12;
     const portraitY = py + 12;
-    const portraitSize = isCompact ? 50 : 58;
+    const portraitSize = isCompact ? 54 : 64;
 
-    this.drawUnitBadgeIcon(
+    this.drawUnitPortraitCard(
+      this.mainPortraitImage,
       portraitX,
       portraitY,
       portraitSize,
+      unit.id,
       unit.category,
       unit.hp,
       unit.maxHp,
@@ -501,8 +541,8 @@ export class BottomInfoPanel {
         : `Yok (0/${unit.carriedResource.maxCapacity} ${unit.carriedResource.resourceLabel})`;
 
     if (isCompact) {
-      // Kompakt mobil görünümde sıkışmadan tüm 7 bilgiyi net göster
       this.col1Text.setFontSize(10.5);
+      this.col1Text.setColor('#e2e8f0');
       this.col1Text.setText(
         `Can: ${unit.hp}/${unit.maxHp}  •  Saldırı: ${unit.attackDamage}  •  Savunma: ${unit.defenseArmor}${combatNote}\n` +
           `Açlık: ${unit.nutrition.statusText}\n` +
@@ -515,6 +555,7 @@ export class BottomInfoPanel {
       const midColX = textStartX + Math.min(300, (rightBtnX - textStartX) * 0.5);
 
       this.col1Text.setFontSize(11.5);
+      this.col1Text.setColor('#e2e8f0');
       this.col1Text.setText(
         `Can: ${unit.hp} / ${unit.maxHp}\n` +
           `Saldırı Hasarı: ${unit.attackDamage}${combatNote}\n` +
@@ -524,6 +565,7 @@ export class BottomInfoPanel {
       this.col1Text.setVisible(true);
 
       this.col2Text.setFontSize(11.5);
+      this.col2Text.setColor('#cbd5e1');
       this.col2Text.setText(
         `Açlık / Tokluk: ${unit.nutrition.statusText}\n` +
           `Taşınan Kaynak: ${carryLine}\n` +
@@ -597,10 +639,10 @@ export class BottomInfoPanel {
       () => this.callbacks.onCommandSelectedEnterTownHall()
     );
 
-    // Birim simgeleri ızgarası (sayfalı, 50+ birim destekli)
+    // Yakın plan köylü portreleri ızgarası (sayfalı, 50+ birim destekli)
     const gridAreaX = px + 14;
     const gridAreaW = Math.max(140, rightBtnX - gridAreaX - 12);
-    const slotSize = isCompact ? 38 : 42;
+    const slotSize = isCompact ? 42 : 48;
     const slotGap = 6;
     const maxCols = Math.max(
       3,
@@ -615,14 +657,16 @@ export class BottomInfoPanel {
     const startIdx = this.multiPage * maxCols;
     const visibleUnits = multi.units.slice(startIdx, startIdx + maxCols);
 
-    const slotY = py + (isCompact ? 48 : 49);
+    const slotY = py + (isCompact ? 47 : 48);
     for (let i = 0; i < visibleUnits.length; i += 1) {
       const item = visibleUnits[i];
       const sx = gridAreaX + i * (slotSize + slotGap);
-      this.drawUnitBadgeIcon(
+      this.drawUnitPortraitCard(
+        this.slotPortraitImages[i],
         sx,
         slotY,
         slotSize,
+        item.id,
         item.category,
         item.hp,
         item.maxHp,
@@ -631,7 +675,7 @@ export class BottomInfoPanel {
 
       const tagTxt = this.slotTexts[i];
       tagTxt.setText(item.shortTag);
-      tagTxt.setPosition(sx + slotSize * 0.5, slotY + slotSize - 7);
+      tagTxt.setPosition(sx + slotSize * 0.5, slotY + slotSize - 6);
       tagTxt.setVisible(true);
 
       this.clickableZones.push({
@@ -668,16 +712,22 @@ export class BottomInfoPanel {
     warnFlash: boolean,
     isCompact: boolean
   ): void {
-    // SOL BÖLÜM: Bina simgesi + Town Hall bilgileri + Köylü üretimi
+    // SOL BÖLÜM: Town Hall yakın plan portresi + bina bilgileri + Köylü üretimi
     const iconX = px + 12;
     const iconY = py + 12;
-    const iconSize = isCompact ? 44 : 52;
-    this.drawTownHallCrest(iconX, iconY, iconSize, snap.hp, snap.maxHp);
+    const iconSize = isCompact ? 46 : 54;
+    this.drawTownHallPortraitCard(
+      this.mainPortraitImage,
+      iconX,
+      iconY,
+      iconSize,
+      snap.hp,
+      snap.maxHp
+    );
 
     const leftTextX = iconX + iconSize + 10;
     const dividerX = px + Math.round(pw * (isCompact ? 0.5 : 0.48));
 
-    // Bölme çizgisi
     this.rootBg.lineStyle(1, 0x334155, 0.85);
     this.rootBg.lineBetween(dividerX, py + 10, dividerX, py + ph - 10);
 
@@ -697,7 +747,6 @@ export class BottomInfoPanel {
     this.headerSubtitle.setPosition(leftTextX, py + 26);
     this.headerSubtitle.setVisible(true);
 
-    // Üretim durumu veya yerleşim bilgisi
     let prodNote: string;
     if (snap.queueLength > 0) {
       prodNote =
@@ -716,10 +765,9 @@ export class BottomInfoPanel {
     this.col1Text.setPosition(leftTextX, py + 43);
     this.col1Text.setVisible(true);
 
-    // Üretim ilerleme çubuğu (kuyruk varsa)
     const trainBtnX = px + 12;
     const trainBtnW = dividerX - px - 22;
-    let trainBtnY = py + ph - 40;
+    const trainBtnY = py + ph - 40;
 
     if (snap.queueLength > 0) {
       const barY = trainBtnY - 10;
@@ -763,7 +811,7 @@ export class BottomInfoPanel {
       }
     );
 
-    // SAĞ BÖLÜM: Garnizon (İçerideki Birimler, simgeler, Tek Çıkar, Tümünü Çıkar)
+    // SAĞ BÖLÜM: Garnizon (yalnızca Town Hall seçildiğinde gösterilen birim sayısı, türleri ve portreler)
     const garX = dividerX + 12;
     const garW = px + pw - garX - 12;
     const gar = snap.garrison;
@@ -790,8 +838,7 @@ export class BottomInfoPanel {
     this.col3TitleText.setPosition(garX, py + 9);
     this.col3TitleText.setVisible(true);
 
-    // Garnizon birim simgeleri ızgarası
-    const slotSize = isCompact ? 32 : 36;
+    const slotSize = isCompact ? 34 : 38;
     const slotGap = 5;
     const maxSlots = Math.max(
       3,
@@ -818,15 +865,17 @@ export class BottomInfoPanel {
     } else {
       const startIdx = this.garrisonPage * maxSlots;
       const visible = gar.units.slice(startIdx, startIdx + maxSlots);
-      const slotY = py + 29;
+      const slotY = py + 28;
 
       for (let i = 0; i < visible.length; i += 1) {
         const gu = visible[i];
         const sx = garX + i * (slotSize + slotGap);
-        this.drawUnitBadgeIcon(
+        this.drawUnitPortraitCard(
+          this.slotPortraitImages[i],
           sx,
           slotY,
           slotSize,
+          gu.id,
           gu.category,
           gu.hp,
           gu.maxHp,
@@ -839,7 +888,7 @@ export class BottomInfoPanel {
         tag.setPosition(sx + slotSize * 0.5, slotY + slotSize - 5);
         tag.setVisible(true);
 
-        // Simgeye tıklanınca doğrudan o birimi dışarı çıkarır
+        // Portreye tıklanınca doğrudan o birimi dışarı çıkarır
         this.clickableZones.push({
           rect: new Phaser.Geom.Rectangle(sx, slotY, slotSize, slotSize + 5),
           onClick: () => this.callbacks.onEjectSingleUnit(gu.id),
@@ -864,7 +913,6 @@ export class BottomInfoPanel {
       }
     }
 
-    // "Tek Çıkar" ve "Tümünü Çıkar" butonları
     const hasGarrison = gar.totalCount > 0;
     const ejectBtnY = py + ph - 40;
     const halfBtnW = Math.floor((garW - 8) * 0.5);
@@ -917,8 +965,9 @@ export class BottomInfoPanel {
   ): void {
     const iconX = px + 14;
     const iconY = py + 14;
-    const iconSize = isCompact ? 46 : 52;
-    this.drawTownHallCrest(
+    const iconSize = isCompact ? 48 : 56;
+    this.drawTownHallPortraitCard(
+      this.mainPortraitImage,
       iconX,
       iconY,
       iconSize,
@@ -937,9 +986,9 @@ export class BottomInfoPanel {
     this.col1Text.setFontSize(isCompact ? 10.5 : 11.5);
     this.col1Text.setColor('#cbd5e1');
     this.col1Text.setText(
-      `Toplam Köylü: ${unitStatus.totalVillagersCount} (Sahada: ${unitStatus.fieldVillagersCount}, Binada: ${unitStatus.garrisonedVillagersCount})\n` +
-        `Depodaki Odun: ${unitStatus.totalStoredWood}  •  Erzak Ekonomisi & Savaş Sistemi: Geliştirme Aşamasında\n` +
-        `İpucu: Birim seçip Town Hall'a sağ tıklayarak (veya dokunarak) garnizona sokabilirsiniz.`
+      `Toplam Nüfus: ${unitStatus.totalVillagersCount} Köylü   •   Depodaki Odun: ${unitStatus.totalStoredWood}\n` +
+        `Erzak Ekonomisi & Savaş Sistemi: Geliştirme Aşamasında\n` +
+        `İpucu: Köylü üretimi ve garnizon yönetimi için Town Hall binasını seçin.`
     );
     this.col1Text.setPosition(textX, py + 34);
     this.col1Text.setVisible(true);
@@ -975,18 +1024,16 @@ export class BottomInfoPanel {
     const nextX = rightEdgeX - btnW;
     const prevX = nextX - btnW - 4;
 
-    this.pageInfoText.setText(
-      `${page + 1}/${totalPages}  ‹   ›`
-    );
+    this.pageInfoText.setText(`${page + 1}/${totalPages}  ‹   ›`);
     this.pageInfoText.setPosition(rightEdgeX - 4, topY + 2);
     this.pageInfoText.setVisible(true);
 
-    this.iconGraphics.fillStyle(0x1e293b, 0.9);
-    this.iconGraphics.fillRoundedRect(prevX, topY, btnW, btnH, 4);
-    this.iconGraphics.fillRoundedRect(nextX, topY, btnW, btnH, 4);
-    this.iconGraphics.lineStyle(1, 0x64748b, 0.9);
-    this.iconGraphics.strokeRoundedRect(prevX, topY, btnW, btnH, 4);
-    this.iconGraphics.strokeRoundedRect(nextX, topY, btnW, btnH, 4);
+    this.iconOverlayGraphics.fillStyle(0x1e293b, 0.9);
+    this.iconOverlayGraphics.fillRoundedRect(prevX, topY, btnW, btnH, 4);
+    this.iconOverlayGraphics.fillRoundedRect(nextX, topY, btnW, btnH, 4);
+    this.iconOverlayGraphics.lineStyle(1, 0x64748b, 0.9);
+    this.iconOverlayGraphics.strokeRoundedRect(prevX, topY, btnW, btnH, 4);
+    this.iconOverlayGraphics.strokeRoundedRect(nextX, topY, btnW, btnH, 4);
 
     this.clickableZones.push({
       rect: new Phaser.Geom.Rectangle(prevX, topY, btnW, btnH),
@@ -1041,61 +1088,45 @@ export class BottomInfoPanel {
   }
 
   /**
-   * Birim türlerine (köylü, savaşçı, komutan) özgü vektörel portre rozeti ve can çubuğu çizer.
+   * Karahanlı dönemi börk ve kaftanına uygun yakın plan karakter portresini,
+   * çerçevesini ve alt can çubuğunu çizer.
    */
-  private drawUnitBadgeIcon(
+  private drawUnitPortraitCard(
+    img: Phaser.GameObjects.Image,
     x: number,
     y: number,
     size: number,
+    unitId: string,
     category: UnitCategory,
     hp: number,
     maxHp: number,
     brightBorder: boolean
   ): void {
-    const g = this.iconGraphics;
-    const bgTone =
-      category === 'commander'
-        ? 0x3b1d1d
-        : category === 'warrior'
-          ? 0x1e293b
-          : 0x1f2d24;
+    const g = this.iconOverlayGraphics;
     const borderTone = brightBorder ? 0x4ade80 : 0xd97706;
 
-    g.fillStyle(bgTone, 0.96);
-    g.fillRoundedRect(x, y, size, size, 7);
-    g.lineStyle(1.3, borderTone, 0.92);
-    g.strokeRoundedRect(x, y, size, size, 7);
-
-    const cx = x + size * 0.5;
-    const cy = y + size * 0.44;
-    const s = size / 42;
-
     if (category === 'villager') {
-      // Karahanlı börk + kaftan omuzu + balta silüeti
-      g.fillStyle(0xc2854c, 1);
-      g.fillRoundedRect(cx - 8 * s, cy + 2 * s, 16 * s, 11 * s, 3);
-      g.fillStyle(0xe5b887, 1);
-      g.fillCircle(cx, cy - 3 * s, 5.2 * s);
-      g.fillStyle(0x5c3a21, 1);
-      g.fillEllipse(cx, cy - 7.5 * s, 12 * s, 5.5 * s);
-      // Küçük demir balta simgesi
-      g.lineStyle(1.6, 0x9ca3af, 1);
-      g.lineBetween(cx + 8 * s, cy + 9 * s, cx + 11 * s, cy - 5 * s);
-      g.fillStyle(0xcbd5e1, 1);
-      g.fillRect(cx + 8 * s, cy - 6 * s, 5 * s, 4 * s);
-    } else if (category === 'warrior') {
-      // Savaşçı miğfer + kalkan simgesi
-      g.fillStyle(0x94a3b8, 1);
-      g.fillCircle(cx, cy - 3 * s, 6 * s);
-      g.fillStyle(0x991b1b, 1);
-      g.fillCircle(cx + 5 * s, cy + 5 * s, 6 * s);
+      const texKey = this.resolveVillagerPortraitKey(unitId);
+      img.setTexture(texKey);
+      img.setPosition(x + 1, y + 1);
+      img.setDisplaySize(size - 2, size - 2);
+      img.setVisible(true);
     } else {
-      // Komutan altın börk/tuğ simgesi
-      g.fillStyle(0xf59e0b, 1);
+      // Gelecekteki savaşçı / komutan birimleri için rozet altlığı
+      img.setVisible(false);
+      const bgTone = category === 'commander' ? 0x3b1d1d : 0x1e293b;
+      g.fillStyle(bgTone, 0.96);
+      g.fillRect(x, y, size, size);
+      const cx = x + size * 0.5;
+      const cy = y + size * 0.44;
+      const s = size / 42;
+      g.fillStyle(category === 'commander' ? 0xf59e0b : 0x94a3b8, 1);
       g.fillCircle(cx, cy - 2 * s, 6.5 * s);
-      g.fillStyle(0xb91c1c, 1);
-      g.fillRoundedRect(cx - 9 * s, cy + 4 * s, 18 * s, 9 * s, 3);
     }
+
+    // Portre dış çerçevesi
+    g.lineStyle(1.6, borderTone, 0.95);
+    g.strokeRect(x, y, size, size);
 
     // Alt can çubuğu
     const barW = size - 6;
@@ -1104,65 +1135,57 @@ export class BottomInfoPanel {
     const barY = y + size - 5;
     const ratio = maxHp > 0 ? Phaser.Math.Clamp(hp / maxHp, 0, 1) : 1;
 
-    g.fillStyle(0x0f172a, 0.95);
-    g.fillRect(barX, barY, barW, barH);
+    g.fillStyle(0x020617, 0.92);
+    g.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
     g.fillStyle(ratio > 0.45 ? 0x22c55e : 0xf59e0b, 1);
     g.fillRect(barX, barY, Math.max(2, barW * ratio), barH);
   }
 
   /**
-   * Eski Türk Hükümdar Konağı (Town Hall) arması çizer.
+   * Kurt armalı Eski Türk Hükümdar Konağı (Town Hall) yakın plan portre kartını çizer.
    */
-  private drawTownHallCrest(
+  private drawTownHallPortraitCard(
+    img: Phaser.GameObjects.Image,
     x: number,
     y: number,
     size: number,
     hp: number,
     maxHp: number
   ): void {
-    const g = this.iconGraphics;
-    g.fillStyle(0x271a12, 0.96);
-    g.fillRoundedRect(x, y, size, size, 8);
-    g.lineStyle(1.4, 0xd97706, 0.95);
-    g.strokeRoundedRect(x, y, size, size, 8);
+    img.setTexture(TOWN_HALL_PORTRAIT_KEY);
+    img.setPosition(x + 1, y + 1);
+    img.setDisplaySize(size - 2, size - 2);
+    img.setVisible(true);
 
-    const cx = x + size * 0.5;
-    const cy = y + size * 0.48;
-    const s = size / 48;
+    const g = this.iconOverlayGraphics;
+    g.lineStyle(1.6, 0xd97706, 0.96);
+    g.strokeRect(x, y, size, size);
 
-    // Kızıl tuğla kaide
-    g.fillStyle(0x9a3412, 1);
-    g.fillRect(cx - 16 * s, cy + 7 * s, 32 * s, 6 * s);
-
-    // Ahşap konak gövdesi ve sütunlar
-    g.fillStyle(0x78472a, 1);
-    g.fillRect(cx - 13 * s, cy - 5 * s, 26 * s, 12 * s);
-    g.fillStyle(0xd97706, 1);
-    g.fillRect(cx - 10 * s, cy - 4 * s, 2.5 * s, 11 * s);
-    g.fillRect(cx + 7.5 * s, cy - 4 * s, 2.5 * s, 11 * s);
-    g.fillRect(cx - 3 * s, cy - 1 * s, 6 * s, 8 * s);
-
-    // Kademeli ahşap çatı ve tepe köşkü
-    g.fillStyle(0x452715, 1);
-    g.beginPath();
-    g.moveTo(cx - 17 * s, cy - 5 * s);
-    g.lineTo(cx, cy - 15 * s);
-    g.lineTo(cx + 17 * s, cy - 5 * s);
-    g.closePath();
-    g.fillPath();
-
-    g.fillStyle(0xf59e0b, 1);
-    g.fillCircle(cx, cy - 16 * s, 2.2 * s);
-
-    // Can çubuğu
     const ratio = maxHp > 0 ? Phaser.Math.Clamp(hp / maxHp, 0, 1) : 1;
-    g.fillStyle(0x0f172a, 0.95);
-    g.fillRect(x + 4, y + size - 6, size - 8, 4);
+    g.fillStyle(0x020617, 0.92);
+    g.fillRect(x + 3, y + size - 6, size - 6, 5);
     g.fillStyle(0x22c55e, 1);
-    g.fillRect(x + 4, y + size - 6, Math.max(2, (size - 8) * ratio), 4);
+    g.fillRect(x + 4, y + size - 5, Math.max(2, (size - 8) * ratio), 3.5);
   }
 
-  private hideTransientTexts(): void {
+  private resolveVillagerPortraitKey(unitId: string): string {
+    const match = /\d+$/.exec(unitId);
+    if (match) {
+      const idx = (Math.max(1, parseInt(match[0], 10)) - 1) % VILLAGER_PORTRAIT_KEYS.length;
+      return VILLAGER_PORTRAIT_KEYS[idx];
+    }
+    let hash = 0;
+    for (let i = 0; i < unitId.length; i += 1) {
+      hash = (hash * 31 + unitId.charCodeAt(i)) >>> 0;
+    }
+    return VILLAGER_PORTRAIT_KEYS[hash % VILLAGER_PORTRAIT_KEYS.length];
+  }
+
+  private hideTransientVisuals(): void {
+    this.mainPortraitImage.setVisible(false);
+    for (const img of this.slotPortraitImages) {
+      img.setVisible(false);
+    }
     this.headerTitle.setVisible(false);
     this.headerSubtitle.setVisible(false);
     this.col1Text.setVisible(false);

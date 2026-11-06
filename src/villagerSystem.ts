@@ -41,7 +41,7 @@ import {
 } from './villager';
 import { WoodDepot } from './woodDepot';
 
-/** Town Hall (9..11, 5..7) ve Odun Deposu (7, 6) önündeki meydanda başlangıçtaki 3 Karahanlı köylüsü */
+/** Town Hall (9..11, 5..7) ve Odun Deposu (6, 5) önündeki meydanda başlangıçtaki 3 Karahanlı köylüsü */
 export const INITIAL_VILLAGER_SPAWNS: readonly VillagerConfig[] = [
   {
     id: 'villager_1',
@@ -1263,8 +1263,11 @@ export class VillagerSystem {
       }
 
       const len = Math.hypot(dc, dr);
-      const spotCol = tc + (dc / len) * INTERACT_STAND_RADIUS;
-      const spotRow = tr + (dr / len) * INTERACT_STAND_RADIUS;
+      const standRadius = this.woodDepot.occupiesTile(tc, tr)
+        ? 1.02
+        : INTERACT_STAND_RADIUS;
+      const spotCol = tc + (dc / len) * standRadius;
+      const spotRow = tr + (dr / len) * standRadius;
 
       const dist = Math.hypot(spotCol - fromPos.col, spotRow - fromPos.row);
       const crowded = this.isSpotCrowded(

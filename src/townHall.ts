@@ -2,12 +2,14 @@
  * Karahanlı RTS — Town Hall (Eski Türk Hükümdar Konağı / Ana Merkez Binası)
  *
  * Karahanlı yerleşiminin kalbi olan, ahşap sütunlu, kızıl tuğla ve taş temelli,
- * Türk geometrik süslemeli ve tuğ sancaklı 3x3 karoluk hükümdar konağı:
+ * giriş kapısı üzerinde Türk geometrik motifli ve kurt kabartmalı zarif arması bulunan,
+ * tuğ sancaklı 3x3 karoluk hükümdar konağı:
  * - Mevcut köylü üretimi (20 Odun, 5 sn) ve üretim kuyruğunu korur
  * - Celtic Kings tarzı sınırsız kapasiteli garnizon sistemiyle köylü, savaşçı
  *   ve komutan gruplarını (50+ kişilik ordular dahil) içine alır
+ * - Harita üzerinde yüzen garnizon yazısı göstermez; garnizondaki birim sayısı ve
+ *   türleri yalnızca bina seçildiğinde alt bilgi panelinde gösterilir
  * - İçerideki birimler zamanla can yeniler; erzak ekonomisiyle beslenmeye hazırdır
- * - İleride çağ geliştirme, teknoloji araştırma ve yerleşim yönetimiyle genişletilebilir
  */
 
 import Phaser from 'phaser';
@@ -136,7 +138,7 @@ export interface TownHallConfig {
   maxHp?: number;
 }
 
-/** Haritanın tam merkezinde, depo (7,6) ve koruluğa komşu anıtsal 3x3 yerleşim konumu */
+/** Haritanın tam merkezinde, odun deposu ve koruluğa komşu anıtsal 3x3 yerleşim konumu */
 export const DEFAULT_TOWN_HALL_CONFIG: TownHallConfig = {
   id: 'town_hall_main',
   originCol: 9,
@@ -172,9 +174,6 @@ export class TownHall implements GarrisonableBuilding {
   private readonly selectionGraphics: Phaser.GameObjects.Graphics;
   private readonly sprite: Phaser.GameObjects.Image;
   private readonly progressGraphics: Phaser.GameObjects.Graphics;
-  private readonly garrisonBadgeBg: Phaser.GameObjects.Graphics;
-  private readonly garrisonBadgeText: Phaser.GameObjects.Text;
-  private lastBadgeCount = -1;
 
   private selected = false;
   private currentAge: SettlementAgeId;
@@ -252,22 +251,6 @@ export class TownHall implements GarrisonableBuilding {
     this.progressGraphics.setPosition(worldPos.x, worldPos.y - 108);
     this.progressGraphics.setDepth(sortDepth + 120);
     this.progressGraphics.setVisible(false);
-
-    this.garrisonBadgeBg = scene.add.graphics();
-    this.garrisonBadgeBg.setPosition(worldPos.x, worldPos.y - 94);
-    this.garrisonBadgeBg.setDepth(sortDepth + 118);
-    this.garrisonBadgeBg.setVisible(false);
-
-    this.garrisonBadgeText = scene.add
-      .text(worldPos.x, worldPos.y - 94, '', {
-        fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-        fontSize: '10px',
-        fontStyle: 'bold',
-        color: '#fef3c7',
-      })
-      .setOrigin(0.5, 0.5)
-      .setDepth(sortDepth + 119)
-      .setVisible(false);
   }
 
   public static preload(scene: Phaser.Scene): void {
@@ -367,8 +350,8 @@ export class TownHall implements GarrisonableBuilding {
    * Birimlerin binaya girmek üzere yönlendirileceği ön merdiven ve çevre yaklaşım noktaları.
    */
   public getEntranceApproachSpots(): GridCoord[] {
-    const cMid = this.originCol + (this.footprintCols - 1) * 0.5; // 10
-    const stairRow = this.originRow + this.footprintRows - 1 + 0.9; // 7.9
+    const cMid = this.originCol + (this.footprintCols - 1) * 0.5;
+    const stairRow = this.originRow + this.footprintRows - 1 + 0.9;
 
     return [
       { col: cMid, row: stairRow },
@@ -495,7 +478,6 @@ export class TownHall implements GarrisonableBuilding {
   ): void {
     // 1) İçerideki birimlerin can yenileme ve erzak güncellemesi
     this.garrison.update(deltaMs, foodWallet);
-    this.refreshWorldGarrisonBadge();
 
     // 2) Üretim / araştırma kuyruğu
     if (this.taskQueue.length === 0) {
@@ -562,7 +544,6 @@ export class TownHall implements GarrisonableBuilding {
 
   public playGarrisonPulse(): void {
     this.playOrderPulse();
-    this.refreshWorldGarrisonBadge();
   }
 
   public ignoreOnCamera(camera: Phaser.Cameras.Scene2D.Camera): void {
@@ -571,8 +552,6 @@ export class TownHall implements GarrisonableBuilding {
       this.selectionGraphics,
       this.sprite,
       this.progressGraphics,
-      this.garrisonBadgeBg,
-      this.garrisonBadgeText,
     ]);
   }
 
@@ -585,8 +564,6 @@ export class TownHall implements GarrisonableBuilding {
     this.selectionGraphics.destroy();
     this.sprite.destroy();
     this.progressGraphics.destroy();
-    this.garrisonBadgeBg.destroy();
-    this.garrisonBadgeText.destroy();
   }
 
   private applyInternalTaskCompletion(task: TownHallTaskDefinition): void {
@@ -614,34 +591,6 @@ export class TownHall implements GarrisonableBuilding {
         }
       },
     });
-  }
-
-  private refreshWorldGarrisonBadge(): void {
-    const count = this.garrison.getCount();
-    if (count === this.lastBadgeCount) {
-      return;
-    }
-    this.lastBadgeCount = count;
-
-    if (count <= 0) {
-      this.garrisonBadgeBg.clear();
-      this.garrisonBadgeBg.setVisible(false);
-      this.garrisonBadgeText.setVisible(false);
-      return;
-    }
-
-    this.garrisonBadgeText.setText(`İçeride: ${count}`);
-    const w = Math.max(54, Math.ceil(this.garrisonBadgeText.width + 14));
-    const h = 16;
-
-    this.garrisonBadgeBg.clear();
-    this.garrisonBadgeBg.fillStyle(0x1e293b, 0.9);
-    this.garrisonBadgeBg.fillRoundedRect(-w * 0.5, -h * 0.5, w, h, 6);
-    this.garrisonBadgeBg.lineStyle(1.1, 0xf59e0b, 0.92);
-    this.garrisonBadgeBg.strokeRoundedRect(-w * 0.5, -h * 0.5, w, h, 6);
-
-    this.garrisonBadgeBg.setVisible(true);
-    this.garrisonBadgeText.setVisible(true);
   }
 
   private refreshWorldProgressBar(): void {
