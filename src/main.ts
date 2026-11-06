@@ -5,18 +5,14 @@
  */
 
 import Phaser from 'phaser';
+import { ForestSystem, INITIAL_FOREST_LAYOUT } from './forestSystem';
 import { IsoGrid } from './isoGrid';
 
-const STEPPE_TREE_TILE = { col: 3, row: 3 } as const;
-
-// 2x HD (230×202) bozkır ağacı sprite'ı temizlenmiş 3B kök taban merkezi: (111, 182)
-const STEPPE_TREE_ORIGIN_X = 111 / 230;
-const STEPPE_TREE_ORIGIN_Y = 182 / 202;
-const STEPPE_SPRITE_SCALE = 0.5;
+const MAP_VERTICAL_OFFSET = 34;
 
 class MainScene extends Phaser.Scene {
   private isoGrid?: IsoGrid;
-  private steppeTree?: Phaser.GameObjects.Image;
+  private forestSystem?: ForestSystem;
   private titleText?: Phaser.GameObjects.Text;
   private subtitleText?: Phaser.GameObjects.Text;
 
@@ -25,7 +21,7 @@ class MainScene extends Phaser.Scene {
   }
 
   preload(): void {
-    this.load.image('steppe-tree', 'assets/sprites/steppe_tree.png');
+    ForestSystem.preload(this);
   }
 
   create(): void {
@@ -37,21 +33,11 @@ class MainScene extends Phaser.Scene {
       tileWidth: 64,
       tileHeight: 32
     });
-    this.isoGrid.setPosition(width / 2, height / 2 + 20);
+    this.isoGrid.setPosition(width / 2, height / 2 + MAP_VERTICAL_OFFSET);
 
-    const treePos = this.isoGrid.tileToWorld(
-      STEPPE_TREE_TILE.col,
-      STEPPE_TREE_TILE.row
-    );
-
-    // Kök tabanı ve hafif temas gölgesi doğrudan karo merkezine oturan bozkır ağacı
-    this.steppeTree = this.add
-      .image(treePos.x, treePos.y, 'steppe-tree')
-      .setOrigin(STEPPE_TREE_ORIGIN_X, STEPPE_TREE_ORIGIN_Y)
-      .setScale(STEPPE_SPRITE_SCALE)
-      .setDepth(
-        this.isoGrid.getTileDepth(STEPPE_TREE_TILE.col, STEPPE_TREE_TILE.row)
-      );
+    // 2 kayın + 2 çam ağacından oluşan başlangıç orman ve odun kaynağı sistemi
+    this.forestSystem = new ForestSystem(this, this.isoGrid);
+    this.forestSystem.populate(INITIAL_FOREST_LAYOUT);
 
     this.titleText = this.add
       .text(width / 2, 42, 'KARAHANLI RTS', {
@@ -64,7 +50,7 @@ class MainScene extends Phaser.Scene {
       .setDepth(5000);
 
     this.subtitleText = this.add
-      .text(width / 2, 76, 'İzometrik Çimen Arazi (8×8 Harita • 64×32 Tile)', {
+      .text(width / 2, 76, 'İzometrik Çimen Arazi & Küçük Orman (8×8 Harita)', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         fontSize: '15px',
         color: '#94a3b8'
@@ -77,15 +63,8 @@ class MainScene extends Phaser.Scene {
 
   private handleResize(gameSize: Phaser.Structs.Size): void {
     const { width, height } = gameSize;
-    this.isoGrid?.setPosition(width / 2, height / 2 + 20);
-
-    if (this.isoGrid && this.steppeTree) {
-      const treePos = this.isoGrid.tileToWorld(
-        STEPPE_TREE_TILE.col,
-        STEPPE_TREE_TILE.row
-      );
-      this.steppeTree.setPosition(treePos.x, treePos.y);
-    }
+    this.isoGrid?.setPosition(width / 2, height / 2 + MAP_VERTICAL_OFFSET);
+    this.forestSystem?.syncPositions();
 
     this.titleText?.setPosition(width / 2, 42);
     this.subtitleText?.setPosition(width / 2, 76);
