@@ -3,8 +3,8 @@
  *
  * Phaser 3 + TypeScript + Vite tabanlı 2D gerçek zamanlı strateji oyunu.
  * 16x16 dikişsiz izometrik çimen haritayı, doğal koruluk yerleşimindeki
- * 2 kayın + 2 çam odun kaynağını (her biri 100 odun), ilk Karahanlı köylüsünü,
- * odun toplama mekaniğini (20 odun kapasite) ve kamera sistemini çalıştırır.
+ * 2 kayın + 2 çam odun kaynağını (her biri 100 odun), sabit ahşap odun deposunu,
+ * ilk Karahanlı köylüsünü ve otomatik odun toplama-teslim döngüsünü çalıştırır.
  */
 
 import Phaser from 'phaser';
@@ -12,6 +12,7 @@ import { MapCameraController } from './cameraController';
 import { ForestSystem } from './forestSystem';
 import { IsoGrid } from './isoGrid';
 import { VillagerSystem } from './villagerSystem';
+import { WoodDepot } from './woodDepot';
 
 /** Arayüz (UI) öğeleri için en üst derinlik katmanı */
 const UI_DEPTH = 5000;
@@ -22,6 +23,7 @@ const TOP_HUD_INSET = 104;
 class MainScene extends Phaser.Scene {
   private isoGrid?: IsoGrid;
   private forestSystem?: ForestSystem;
+  private woodDepot?: WoodDepot;
   private villagerSystem?: VillagerSystem;
   private cameraController?: MapCameraController;
   private uiCamera?: Phaser.Cameras.Scene2D.Camera;
@@ -31,7 +33,7 @@ class MainScene extends Phaser.Scene {
   private woodPanelBg?: Phaser.GameObjects.Graphics;
   private woodStatusText?: Phaser.GameObjects.Text;
   private lastWoodHudLine = '';
-  private lastWoodFull = false;
+  private lastDelivering = false;
 
   constructor() {
     super({ key: 'MainScene' });
@@ -58,6 +60,9 @@ class MainScene extends Phaser.Scene {
     this.forestSystem = new ForestSystem(this, this.isoGrid);
     this.forestSystem.populate();
 
+    // Koruluğa yakın sabit odun deposu (col: 7, row: 6)
+    this.woodDepot = new WoodDepot(this, this.isoGrid);
+
     // 16x16 harita için ekran ölçekleme, sürükleme ve yakınlaştırma kontrolcüsü
     const mapSize = this.isoGrid.getWorldSize();
     this.cameraController = new MapCameraController(this, this.cameras.main, {
@@ -66,16 +71,17 @@ class MainScene extends Phaser.Scene {
       topUiInset: TOP_HUD_INSET,
     });
 
-    // İlk Karahanlı köylüsü, seçim halkası, yürüyüş ve odun toplama sistemi
+    // İlk Karahanlı köylüsü, seçim halkası, yürüyüş ve odun toplama/teslim sistemi
     this.villagerSystem = new VillagerSystem(
       this,
       this.isoGrid,
       this.forestSystem,
+      this.woodDepot,
       this.cameraController
     );
     this.villagerSystem.spawnInitialVillager();
 
-    // Sabit üst başlık, kontrol açıklaması ve köylü odun taşıma göstergesi
+    // Sabit üst başlık, kontrol açıklaması ve toplam/taşınan odun sayacı
     this.titleText = this.add
       .text(0, 0, 'KARAHANLI RTS', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
@@ -90,7 +96,7 @@ class MainScene extends Phaser.Scene {
       .text(
         0,
         0,
-        'Sol Tık / Dokun: Seç  •  Ağaca Sağ Tık / Dokun: Odun Kes  •  Zemine Sağ Tık / Dokun: Yürüt',
+        'Sol Tık / Dokun: Seç  •  Ağaca Sağ Tık / Dokun: Odun Topla  •  Zemine Sağ Tık / Dokun: Yürüt',
         {
           fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
           fontSize: '12px',
@@ -127,6 +133,7 @@ class MainScene extends Phaser.Scene {
       this.uiCamera.ignore(terrainImg);
     }
     this.forestSystem.ignoreOnCamera(this.uiCamera);
+    this.woodDepot.ignoreOnCamera(this.uiCamera);
     this.villagerSystem.ignoreOnCamera(this.uiCamera);
 
     this.refreshWoodHud(true);
@@ -151,8 +158,8 @@ class MainScene extends Phaser.Scene {
       return;
     }
 
-    const isFull = status.carriedWood >= status.maxCapacity;
-    const capNote = isFull ? ' (Dolu)' : '';
+    const isDelivering = status.state === 'returning_to_depot';
+    const carryTag = isDelivering ? ' (Depoya)' : '';
     let detailPart = `Orman: ${status.remainingTreesCount} Ağaç`;
 
     if (
@@ -161,19 +168,22 @@ class MainScene extends Phaser.Scene {
       status.targetTreeMaxWood !== null
     ) {
       const treeName = status.targetTreeType === 'cam' ? 'Çam' : 'Kayın';
-      const actionLabel = status.state === 'chopping' ? 'Kesiliyor' : 'Hedef';
-      detailPart = `${treeName} (${actionLabel}): ${status.targetTreeWood} / ${status.targetTreeMaxWood}`;
+      detailPart = `${treeName}: ${status.targetTreeWood} / ${status.targetTreeMaxWood}`;
     }
 
-    const line = `Taşınan Odun: ${status.carriedWood} / ${status.maxCapacity}${capNote}   •   ${detailPart}`;
-    if (!force && line === this.lastWoodHudLine && isFull === this.lastWoodFull) {
+    const line = `Toplam Odun: ${status.totalStoredWood}   •   Taşınan: ${status.carriedWood} / ${status.maxCapacity}${carryTag}   •   ${detailPart}`;
+    if (
+      !force &&
+      line === this.lastWoodHudLine &&
+      isDelivering === this.lastDelivering
+    ) {
       return;
     }
 
     this.lastWoodHudLine = line;
-    this.lastWoodFull = isFull;
+    this.lastDelivering = isDelivering;
     this.woodStatusText.setText(line);
-    this.woodStatusText.setColor(isFull ? '#fbbf24' : '#f1f5f9');
+    this.woodStatusText.setColor(isDelivering ? '#fde68a' : '#f1f5f9');
     this.drawWoodPillBackground(this.scale.width);
   }
 
@@ -199,7 +209,7 @@ class MainScene extends Phaser.Scene {
     const isCompact = screenWidth < 560;
     const centerY = isCompact ? 74 : 76;
     const textW = this.woodStatusText.width;
-    const pillW = Math.min(screenWidth - 20, Math.max(220, textW + 28));
+    const pillW = Math.min(screenWidth - 16, Math.max(240, textW + 28));
     const pillH = isCompact ? 24 : 26;
     const x = (screenWidth - pillW) * 0.5;
     const y = centerY - pillH * 0.5;
@@ -209,7 +219,7 @@ class MainScene extends Phaser.Scene {
     this.woodPanelBg.fillRoundedRect(x, y, pillW, pillH, 12);
     this.woodPanelBg.lineStyle(
       1,
-      this.lastWoodFull ? 0xf59e0b : 0x475569,
+      this.lastDelivering ? 0xf59e0b : 0x475569,
       0.9
     );
     this.woodPanelBg.strokeRoundedRect(x, y, pillW, pillH, 12);
@@ -225,6 +235,7 @@ class MainScene extends Phaser.Scene {
   private cleanup(): void {
     this.scale.off('resize', this.handleResize, this);
     this.villagerSystem?.destroy();
+    this.woodDepot?.destroy();
     this.cameraController?.destroy();
     this.forestSystem?.destroy();
     this.isoGrid?.destroy();
