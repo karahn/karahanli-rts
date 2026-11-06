@@ -79,6 +79,26 @@ export class WoodDepot {
     return this.storedWood;
   }
 
+  /** Depoda belirtilen miktarda harcanabilir odun olup olmadığını döndürür. */
+  public canAffordWood(amount: number): boolean {
+    return amount >= 0 && this.storedWood >= amount;
+  }
+
+  /**
+   * Üretim, inşaat veya araştırma için depodan odun harcar.
+   * Yeterli odun yoksa false döndürür ve mevcut miktarı değiştirmez.
+   */
+  public spendWood(amount: number): boolean {
+    if (amount <= 0) {
+      return true;
+    }
+    if (this.storedWood < amount) {
+      return false;
+    }
+    this.storedWood -= amount;
+    return true;
+  }
+
   /**
    * Köylünün getirdiği odunu depoya ekler ve hafif bir teslim animasyonu oynatır.
    */
