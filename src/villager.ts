@@ -2,9 +2,9 @@
  * Karahanlı RTS — Köylü Birim Sınıfı (Villager)
  *
  * Tarihî Karahanlı dönemine uygun erkek köylü biriminin konum, hareket hızı,
- * seçim durumu, yönlü yürüyüş animasyonu, balta sallayarak odun toplama (20 kapasite),
- * dolunca ortak odun deposuna yürüme, odunu teslim edip tekrar ağaca dönme döngüsünü
- * ve izometrik derinlik sıralamasını bağımsız olarak yönetir.
+ * tekli/çoklu seçim durumu, yönlü yürüyüş animasyonu, balta sallayarak odun toplama
+ * (20 kapasite), dolunca ortak odun deposuna yürüme, odunu teslim edip tekrar ağaca
+ * dönme döngüsünü, dinamik birim ayrışmasını ve izometrik derinlik sıralamasını yönetir.
  */
 
 import Phaser from 'phaser';
@@ -108,6 +108,10 @@ export class Villager {
   private assignedTreeId: string | null = null;
   private chopTimerMs = 0;
 
+  /** Çoklu hareket sırasında hedef yakınında sıkışmayı önleyen varış sayacı */
+  private nearGoalCrowdedMs = 0;
+  private wasSeparatedLastStep = false;
+
   constructor(scene: Phaser.Scene, isoGrid: IsoGrid, config: VillagerConfig) {
     this.id = config.id;
     this.displayName = config.displayName ?? config.id;
@@ -202,6 +206,10 @@ export class Villager {
     return this.selected;
   }
 
+  public isMoving(): boolean {
+    return this.state === 'walking' || this.state === 'returning_to_depot';
+  }
+
   public getGridPosition(): GridCoord {
     return { col: this.gridPos.col, row: this.gridPos.row };
   }
@@ -238,7 +246,7 @@ export class Villager {
 
   public setMoveSpeed(speedTilesPerSec: number): void {
     this.moveSpeed = Math.max(0.2, speedTilesPerSec);
-    if (this.state === 'walking' || this.state === 'returning_to_depot') {
+    if (this.isMoving()) {
       this.sprite.anims.timeScale = this.moveSpeed / DEFAULT_MOVE_SPEED;
     }
   }
@@ -249,11 +257,12 @@ export class Villager {
 
   /**
    * Köylüye normal bir yürüyüş rotası atar.
-   * Sadece bu köylünün aktif odun toplama veya depoya dönüş döngüsü iptal edilir.
+   * Bu köylünün aktif odun toplama veya depoya dönüş döngüsünü iptal eder.
    */
   public setMovePath(waypoints: GridCoord[]): void {
     this.assignedTreeId = null;
     this.chopTimerMs = 0;
+    this.nearGoalCrowdedMs = 0;
 
     if (waypoints.length === 0) {
       this.stopMovement();
@@ -273,6 +282,7 @@ export class Villager {
   ): void {
     this.assignedTreeId = treeId;
     this.chopTimerMs = 0;
+    this.nearGoalCrowdedMs = 0;
 
     if (this.isCarryFull()) {
       this.startReturnToDepot(context);
@@ -292,12 +302,16 @@ export class Villager {
   /**
    * Köylüye elindeki mevcut odunu doğrudan ortak depoya götürüp bırakma emri verir.
    */
-  public setDeliverToDepotOrder(context: VillagerWorldContext): void {
+  public setDeliverToDepotOrder(
+    context: VillagerWorldContext,
+    customWaypoints?: GridCoord[]
+  ): void {
     this.assignedTreeId = null;
     this.chopTimerMs = 0;
+    this.nearGoalCrowdedMs = 0;
 
     if (this.carriedWood <= 0) {
-      const depotWaypoints = context.planPathToDepot(this);
+      const depotWaypoints = customWaypoints ?? context.planPathToDepot(this);
       if (depotWaypoints.length > 0) {
         this.assignPathQueue(depotWaypoints, 'walking');
       } else {
@@ -306,7 +320,7 @@ export class Villager {
       return;
     }
 
-    this.startReturnToDepot(context);
+    this.startReturnToDepot(context, customWaypoints);
   }
 
   public stopMovement(): void {
@@ -314,18 +328,62 @@ export class Villager {
     this.targetGridPos = null;
     this.assignedTreeId = null;
     this.chopTimerMs = 0;
+    this.nearGoalCrowdedMs = 0;
     this.enterIdlePose();
   }
 
   public update(deltaMs: number, context: VillagerWorldContext): void {
     if (this.state === 'walking' || this.state === 'returning_to_depot') {
       this.updatePathMovement(deltaMs, context);
+      this.wasSeparatedLastStep = false;
       return;
     }
 
+    this.wasSeparatedLastStep = false;
     if (this.state === 'chopping') {
       this.updateChopping(deltaMs, context);
     }
+  }
+
+  /**
+   * Çoklu köylü hareketinde birbirlerinin üstüne binmemeleri için dinamik
+   * ayrışma itmesini engellere çarpmadan uygular.
+   */
+  public applySeparationOffset(
+    dCol: number,
+    dRow: number,
+    isWalkablePos: (col: number, row: number) => boolean
+  ): boolean {
+    if (Math.abs(dCol) < 0.0001 && Math.abs(dRow) < 0.0001) {
+      return false;
+    }
+
+    const fullCol = this.gridPos.col + dCol;
+    const fullRow = this.gridPos.row + dRow;
+
+    if (isWalkablePos(fullCol, fullRow)) {
+      this.gridPos.col = fullCol;
+      this.gridPos.row = fullRow;
+      this.wasSeparatedLastStep = true;
+      this.syncVisualTransform();
+      return true;
+    }
+
+    if (Math.abs(dCol) > 0.0001 && isWalkablePos(fullCol, this.gridPos.row)) {
+      this.gridPos.col = fullCol;
+      this.wasSeparatedLastStep = true;
+      this.syncVisualTransform();
+      return true;
+    }
+
+    if (Math.abs(dRow) > 0.0001 && isWalkablePos(this.gridPos.col, fullRow)) {
+      this.gridPos.row = fullRow;
+      this.wasSeparatedLastStep = true;
+      this.syncVisualTransform();
+      return true;
+    }
+
+    return false;
   }
 
   public containsWorldPoint(
@@ -349,8 +407,33 @@ export class Villager {
   }
 
   /**
+   * Fare veya dokunmatik seçim dikdörtgeninin (dünya uzayı karşılığı) bu köylünün
+   * görsel gövdesini kesip kesmediğini döndürür.
+   */
+  public intersectsWorldRect(
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number
+  ): boolean {
+    const halfW = 16 * this.unitScale;
+    const bodyHeight = 88 * this.unitScale;
+
+    const unitLeft = this.worldPos.x - halfW;
+    const unitRight = this.worldPos.x + halfW;
+    const unitTop = this.worldPos.y - bodyHeight;
+    const unitBottom = this.worldPos.y + 4;
+
+    return (
+      unitRight >= minX &&
+      unitLeft <= maxX &&
+      unitBottom >= minY &&
+      unitTop <= maxY
+    );
+  }
+
+  /**
    * Tıklanan/dokunulan noktanın bu köylünün görsel gövde merkezine olan uzaklığını döndürür.
-   * Yakın duran birden fazla köylü arasında en doğru seçimi yapmak için kullanılır.
    */
   public distanceToBodyCenter(worldX: number, worldY: number): number {
     const bodyCenterY = this.worldPos.y - 46 * this.unitScale;
@@ -386,6 +469,7 @@ export class Villager {
       col: waypoints[waypoints.length - 1].col,
       row: waypoints[waypoints.length - 1].row,
     };
+    this.nearGoalCrowdedMs = 0;
     this.state = moveState;
     this.updateWalkingFacing(waypoints[0]);
   }
@@ -413,7 +497,7 @@ export class Villager {
         const dr = nextWaypoint.row - this.gridPos.row;
         const dist = Math.hypot(dc, dr);
 
-        if (dist <= 0.0005) {
+        if (dist <= 0.002) {
           this.gridPos.col = nextWaypoint.col;
           this.gridPos.row = nextWaypoint.row;
           this.pathQueue.shift();
@@ -441,11 +525,29 @@ export class Villager {
         }
       }
 
+      // Son ara noktaya çok yakınken komşu köylü ayrışması itiyorsa sonsuz yürüyüşü önle
+      if (this.pathQueue.length === 1) {
+        const finalPt = this.pathQueue[0];
+        const distToFinal = Math.hypot(
+          finalPt.col - this.gridPos.col,
+          finalPt.row - this.gridPos.row
+        );
+        if (distToFinal < 0.72 && this.wasSeparatedLastStep) {
+          this.nearGoalCrowdedMs += deltaMs;
+          if (this.nearGoalCrowdedMs >= 260) {
+            this.pathQueue = [];
+          }
+        } else {
+          this.nearGoalCrowdedMs = Math.max(0, this.nearGoalCrowdedMs - deltaMs);
+        }
+      }
+
       this.syncVisualTransform();
     }
 
     if (this.pathQueue.length === 0) {
       this.targetGridPos = null;
+      this.nearGoalCrowdedMs = 0;
 
       if (arrivingState === 'returning_to_depot') {
         this.completeDepotDeliveryAndResume(context);
@@ -557,7 +659,10 @@ export class Villager {
     }
   }
 
-  private startReturnToDepot(context: VillagerWorldContext): void {
+  private startReturnToDepot(
+    context: VillagerWorldContext,
+    customWaypoints?: GridCoord[]
+  ): void {
     this.chopTimerMs = 0;
     const depotTile = context.woodDepot.getTile();
     const distToDepot = Math.hypot(
@@ -565,14 +670,14 @@ export class Villager {
       this.gridPos.row - depotTile.row
     );
 
-    if (distToDepot >= 0.74 && distToDepot <= 1.08) {
+    if (distToDepot >= 0.72 && distToDepot <= 1.24) {
       this.pathQueue = [];
       this.targetGridPos = null;
       this.completeDepotDeliveryAndResume(context);
       return;
     }
 
-    const waypoints = context.planPathToDepot(this);
+    const waypoints = customWaypoints ?? context.planPathToDepot(this);
     if (waypoints.length > 0) {
       this.assignPathQueue(waypoints, 'returning_to_depot');
     } else {

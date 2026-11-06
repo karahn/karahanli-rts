@@ -2,11 +2,13 @@
  * Karahanlı RTS — Harita Kamera ve Ekran Ölçekleme Kontrolcüsü (MapCameraController)
  *
  * Genişletilmiş 16x16 izometrik haritanın hem masaüstü hem mobil tarayıcılarda
- * tamamının dengeli biçimde görülmesini ve akıcı şekilde gezilebilmesini sağlar:
+ * tamamının dengeli biçimde görülmesini ve çoklu seçim kutusuyla çakışmadan
+ * akıcı şekilde gezilebilmesini sağlar:
  * - Ekran boyutuna göre otomatik sığdırma (auto-fit zoom)
- * - Fare sürükleme / tek parmak dokunmatik kaydırma (tıklama ve sağ tık komutlarıyla çakışmaz)
- * - Fare tekerleği ve iki parmak sıkıştırma (pinch-to-zoom) ile yakınlaştırma
- * - Ok tuşları / WASD ile klavye kaydırma, Home veya R ile merkeze sıfırlama
+ * - Masaüstünde: Orta fare tuşu (veya Boşluk + Sol Sürükleme) ve WASD / Ok tuşlarıyla kaydırma
+ *   (Sol tık sürükleme çoklu birim seçim dikdörtgenine ayrılmıştır)
+ * - Mobilde: Tek parmak dokunmatik kaydırma ("Kutu Seç" modu kapalıyken) ve iki parmak yakınlaştırma
+ * - Fare tekerleği ile yakınlaştırma, Home veya R ile merkeze sıfırlama
  */
 
 import Phaser from 'phaser';
@@ -18,6 +20,8 @@ export interface MapCameraConfig {
   mapHeight: number;
   /** Üst başlık / HUD için ayrılan ekran piksel yüksekliği */
   topUiInset?: number;
+  /** Alt kontrol çubuğu için ayrılan ekran piksel yüksekliği */
+  bottomUiInset?: number;
 }
 
 const MAX_ZOOM = 1.85;
@@ -30,6 +34,7 @@ export class MapCameraController {
   private readonly mapWidth: number;
   private readonly mapHeight: number;
   private readonly topUiInset: number;
+  private readonly bottomUiInset: number;
 
   /** Kameranın ekran merkezinde baktığı dünya koordinatı */
   private lookX = 0;
@@ -48,6 +53,9 @@ export class MapCameraController {
   private lastDragY = 0;
   private lastPinchDistance = 0;
 
+  /** Seçim kutusu veya HUD butonları aktifken kamera sürüklemesini devre dışı bırakan sorgu */
+  private shouldSuppressPointerDrag?: (pointer: Phaser.Input.Pointer) => boolean;
+
   /** Opsiyonel klavye tuşları (masaüstü) */
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasdKeys?: {
@@ -57,6 +65,7 @@ export class MapCameraController {
     D: Phaser.Input.Keyboard.Key;
     R: Phaser.Input.Keyboard.Key;
     HOME: Phaser.Input.Keyboard.Key;
+    SPACE: Phaser.Input.Keyboard.Key;
   };
 
   constructor(
@@ -69,6 +78,7 @@ export class MapCameraController {
     this.mapWidth = config.mapWidth;
     this.mapHeight = config.mapHeight;
     this.topUiInset = config.topUiInset ?? 78;
+    this.bottomUiInset = config.bottomUiInset ?? 52;
 
     // Mobil iki parmak pinch-to-zoom için ikinci dokunma noktasını etkinleştir
     if (scene.input.manager.pointersTotal < 3) {
@@ -81,9 +91,25 @@ export class MapCameraController {
   }
 
   /**
+   * Harici sistemlerin (ör. mobil kutu seçim modu veya HUD buton tıklamaları)
+   * belirli işaretçi hareketlerinde kamera sürüklemesini bastırmasına izin verir.
+   */
+  public setPointerDragSuppression(
+    predicate: (pointer: Phaser.Input.Pointer) => boolean
+  ): void {
+    this.shouldSuppressPointerDrag = predicate;
+  }
+
+  /**
+   * Masaüstünde Boşluk (Space) tuşunun kamera kaydırma için basılı olup olmadığını döndürür.
+   */
+  public isSpacePanHeld(): boolean {
+    return Boolean(this.wasdKeys?.SPACE.isDown);
+  }
+
+  /**
    * Son işaretçi (fare/dokunma) etkileşiminin harita sürükleme veya iki parmak
-   * yakınlaştırma olup olmadığını döndürür. Birim seçim/hareket sistemi tıklama ile
-   * kamera kaydırmayı ayırt etmek için bu metodu kullanır.
+   * yakınlaştırma olup olmadığını döndürür.
    */
   public wasPointerGestureDragged(): boolean {
     return this.gestureDragged;
@@ -91,7 +117,6 @@ export class MapCameraController {
 
   /**
    * Ekran boyutu değiştiğinde ölçek sınırlarını günceller.
-   * Oyuncu kamerayı elle kaydırmadıysa haritayı yeniden tam ortalar.
    */
   public handleResize(width: number, height: number): void {
     this.camera.setSize(width, height);
@@ -114,18 +139,22 @@ export class MapCameraController {
     this.fitToViewport(this.scene.scale.width, this.scene.scale.height, true);
   }
 
-  /**
-   * Mevcut ekran boyutuna göre 16x16 haritanın tamamını sığdıran zoom değerini hesaplar.
-   */
   private fitToViewport(width: number, height: number, recenter: boolean): void {
     const safeWidth = Math.max(width - 40, 220);
-    const safeHeight = Math.max(height - this.topUiInset - 28, 180);
+    const safeHeight = Math.max(
+      height - this.topUiInset - this.bottomUiInset - 16,
+      180
+    );
 
     const fitScaleX = safeWidth / (this.mapWidth + 32);
     const fitScaleY = safeHeight / (this.mapHeight + 36);
     const fullMapFitZoom = Math.min(fitScaleX, fitScaleY);
 
-    this.minZoom = Phaser.Math.Clamp(Math.min(fullMapFitZoom * 0.92, 0.75), 0.3, 0.9);
+    this.minZoom = Phaser.Math.Clamp(
+      Math.min(fullMapFitZoom * 0.92, 0.75),
+      0.3,
+      0.9
+    );
     this.defaultZoom = Phaser.Math.Clamp(fullMapFitZoom, 0.5, 1.08);
 
     if (recenter) {
@@ -133,7 +162,11 @@ export class MapCameraController {
       this.lookX = 0;
       this.lookY = this.getCenteredLookY(this.defaultZoom);
     } else {
-      const clampedZoom = Phaser.Math.Clamp(this.camera.zoom, this.minZoom, MAX_ZOOM);
+      const clampedZoom = Phaser.Math.Clamp(
+        this.camera.zoom,
+        this.minZoom,
+        MAX_ZOOM
+      );
       this.camera.setZoom(clampedZoom);
     }
 
@@ -141,7 +174,8 @@ export class MapCameraController {
   }
 
   private getCenteredLookY(zoom: number): number {
-    return -6 - this.topUiInset / (2 * zoom);
+    const verticalBias = (this.topUiInset - this.bottomUiInset) / (2 * zoom);
+    return -4 - verticalBias;
   }
 
   private setupPointerControls(): void {
@@ -157,11 +191,23 @@ export class MapCameraController {
 
       this.gestureDragged = false;
 
-      // Masaüstünde sağ tık birim hareket komutu içindir; kamera sürükleme sol/orta tuş veya dokunma ile yapılır
-      if (!pointer.wasTouch && pointer.button === 2) {
+      if (this.shouldSuppressPointerDrag?.(pointer)) {
         this.isPointerCandidate = false;
         this.isDragging = false;
         return;
+      }
+
+      if (!pointer.wasTouch) {
+        // Masaüstünde sol tık sürükleme çoklu seçim kutusu içindir;
+        // kamera fare ile orta tuş (button === 1) veya Space + Sol tuşla sürüklenir
+        const isMiddleButton = pointer.button === 1;
+        const isSpaceLeftDrag =
+          pointer.button === 0 && Boolean(this.wasdKeys?.SPACE.isDown);
+        if (!isMiddleButton && !isSpaceLeftDrag) {
+          this.isPointerCandidate = false;
+          this.isDragging = false;
+          return;
+        }
       }
 
       this.isPointerCandidate = true;
@@ -235,7 +281,11 @@ export class MapCameraController {
         deltaY: number
       ) => {
         const zoomFactor = deltaY > 0 ? 0.9 : 1.11;
-        this.zoomAtScreenPoint(this.camera.zoom * zoomFactor, pointer.x, pointer.y);
+        this.zoomAtScreenPoint(
+          this.camera.zoom * zoomFactor,
+          pointer.x,
+          pointer.y
+        );
       }
     );
   }
@@ -254,6 +304,7 @@ export class MapCameraController {
       D: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
       R: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R),
       HOME: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.HOME),
+      SPACE: keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE),
     };
 
     this.wasdKeys.R.on('down', () => this.resetView());
@@ -305,7 +356,8 @@ export class MapCameraController {
     }
 
     const len = Math.hypot(dirX, dirY);
-    const stepWorld = (KEYBOARD_PAN_SPEED * (deltaMs / 1000)) / this.camera.zoom;
+    const stepWorld =
+      (KEYBOARD_PAN_SPEED * (deltaMs / 1000)) / this.camera.zoom;
 
     this.hasUserAdjustedView = true;
     this.lookX += (dirX / len) * stepWorld;
@@ -313,7 +365,11 @@ export class MapCameraController {
     this.applyCameraTransform();
   }
 
-  private zoomAtScreenPoint(targetZoom: number, screenX: number, screenY: number): void {
+  private zoomAtScreenPoint(
+    targetZoom: number,
+    screenX: number,
+    screenY: number
+  ): void {
     const oldZoom = this.camera.zoom;
     const newZoom = Phaser.Math.Clamp(targetZoom, this.minZoom, MAX_ZOOM);
     if (Math.abs(newZoom - oldZoom) < 0.0005) {
@@ -335,7 +391,9 @@ export class MapCameraController {
   }
 
   private isTwoFingerGestureActive(): boolean {
-    return Boolean(this.scene.input.pointer1?.isDown && this.scene.input.pointer2?.isDown);
+    return Boolean(
+      this.scene.input.pointer1?.isDown && this.scene.input.pointer2?.isDown
+    );
   }
 
   private applyCameraTransform(): void {
