@@ -33,6 +33,8 @@ export class IsoGrid {
   private readonly showGridLines: boolean;
   private readonly mapTextureKey: string;
   private terrainImage?: Phaser.GameObjects.Image;
+  private mapX = 0;
+  private mapY = 0;
 
   constructor(scene: Phaser.Scene, options: IsoGridOptions) {
     this.scene = scene;
@@ -234,10 +236,33 @@ export class IsoGrid {
     }
 
     this.terrainImage.setOrigin(originX / canvasWidth, originY / canvasHeight);
+    this.terrainImage.setDepth(0);
   }
 
   public setPosition(x: number, y: number): void {
-    this.terrainImage?.setPosition(Math.round(x), Math.round(y));
+    this.mapX = Math.round(x);
+    this.mapY = Math.round(y);
+    this.terrainImage?.setPosition(this.mapX, this.mapY);
+  }
+
+  /**
+   * Verilen (col, row) karosunun sahnedeki (dünya/ekran) tam merkez koordinatını döndürür.
+   */
+  public tileToWorld(col: number, row: number): { x: number; y: number } {
+    const local = this.gridToIso(col, row);
+    return {
+      x: Math.round(this.mapX + local.x),
+      y: Math.round(this.mapY + local.y)
+    };
+  }
+
+  /**
+   * İzometrik derinlik sıralaması (depth sorting) değerini hesaplar.
+   * Zemin depth=0'da kalır; güneydeki (ekranda daha aşağıda bulunan) nesneler önde çizilir.
+   */
+  public getTileDepth(col: number, row: number, zOffset = 0): number {
+    const local = this.gridToIso(col, row);
+    return 1000 + local.y + col * 0.01 + zOffset;
   }
 
   /**
