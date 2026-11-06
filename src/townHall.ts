@@ -1,19 +1,24 @@
 /**
- * Karahanlı RTS — Town Hall (Ana Merkez Binası ve Yerleşim Yönetimi)
+ * Karahanlı RTS — Town Hall (Eski Türk Hükümdar Konağı / Ana Merkez Binası)
  *
- * Karahanlı yerleşiminin kalbi olan, oyun başlangıcında haritada hazır bulunan
- * 3x3 karoluk anıtsal merkez binası:
- * - Tıklandığında / dokunulduğunda seçilir ve "Köylü Üret" (20 Odun, 5 sn) panelini açar
- * - Yeterli odun yoksa (< 20) üretime izin vermez
- * - Üretilen köylüleri ön merdiven meydanında uygun açık noktada dünyaya çıkarır
- * - İleride Çağ Geliştirme (age_advance), Teknoloji Araştırma (tech_research) ve
- *   Yerleşim Yönetimi (nüfus, vergi/verim çarpanları, toplanma noktası) özellikleriyle
- *   doğrudan genişletilebilecek görev kuyruğu mimarisine sahiptir
+ * Karahanlı yerleşiminin kalbi olan, ahşap sütunlu, kızıl tuğla ve taş temelli,
+ * Türk geometrik süslemeli ve tuğ sancaklı 3x3 karoluk hükümdar konağı:
+ * - Mevcut köylü üretimi (20 Odun, 5 sn) ve üretim kuyruğunu korur
+ * - Celtic Kings tarzı sınırsız kapasiteli garnizon sistemiyle köylü, savaşçı
+ *   ve komutan gruplarını (50+ kişilik ordular dahil) içine alır
+ * - İçerideki birimler zamanla can yeniler; erzak ekonomisiyle beslenmeye hazırdır
+ * - İleride çağ geliştirme, teknoloji araştırma ve yerleşim yönetimiyle genişletilebilir
  */
 
 import Phaser from 'phaser';
+import {
+  BuildingGarrisonController,
+  BuildingGarrisonSnapshot,
+  GarrisonableBuilding,
+} from './garrisonSystem';
 import { IsoGrid } from './isoGrid';
 import { GridCoord } from './pathfinding';
+import { SettlementFoodProvisionWallet } from './unitTypes';
 import { WoodDepot } from './woodDepot';
 
 export const TOWN_HALL_TEXTURE_KEY = 'town_hall_karahanli';
@@ -24,16 +29,15 @@ export const VILLAGER_PRODUCTION_WOOD_COST = 20;
 export const VILLAGER_PRODUCTION_DURATION_MS = 5000;
 export const TRAIN_VILLAGER_TASK_ID = 'train_villager';
 
-const TEX_WIDTH = 386;
-const TEX_HEIGHT = 241;
-/** 3x3 izometrik taş kaide merkezinin doku içindeki tam piksel karşılığı */
-const ORIGIN_X = 193.69 / TEX_WIDTH;
-const ORIGIN_Y = 136.44 / TEX_HEIGHT;
-/** 2x retina dokuyu dünya uzayında 193x120.5 px (tam 3x3 karo elması) çizen ölçek */
+const TEX_WIDTH = 397;
+const TEX_HEIGHT = 311;
+/** 3x3 izometrik taş/kızıl tuğla kaide merkezinin doku içindeki tam piksel karşılığı */
+const ORIGIN_X = 198.32 / TEX_WIDTH;
+const ORIGIN_Y = 206.12 / TEX_HEIGHT;
+/** 2x retina dokuyu dünya uzayında tam 3x3 karo elmasına oturtan ölçek */
 const DISPLAY_SCALE = 0.5;
 const MAX_PRODUCTION_QUEUE = 5;
 
-/** İleriki aşamalar için yerleşim çağ kimlikleri */
 export type SettlementAgeId =
   | 'age_1_bozkir_obasi'
   | 'age_2_karahanli_beyligi'
@@ -63,7 +67,6 @@ export const SETTLEMENT_AGES: Record<SettlementAgeId, SettlementAgeInfo> = {
   },
 };
 
-/** Çoklu kaynak genişlemesine hazır maliyet yapısı */
 export interface SettlementResourceCost {
   wood?: number;
   food?: number;
@@ -71,7 +74,6 @@ export interface SettlementResourceCost {
   gold?: number;
 }
 
-/** Town Hall görev kategorileri: birim üretimi, teknoloji araştırması, çağ atlama */
 export type TownHallTaskKind =
   | 'unit_production'
   | 'tech_research'
@@ -84,9 +86,7 @@ export interface TownHallTaskDefinition {
   cost: SettlementResourceCost;
   durationMs: number;
   requiredAge?: SettlementAgeId;
-  /** Tek seferlik araştırmalar/çağ geçişleri için true */
   unique?: boolean;
-  /** Çağ geçişi görevlerinde hedef çağ */
   targetAge?: SettlementAgeId;
 }
 
@@ -108,7 +108,12 @@ export interface EnqueueTaskResult {
 }
 
 export interface TownHallHudSnapshot {
+  id: string;
+  buildingName: string;
+  buildingSubtitle: string;
   selected: boolean;
+  hp: number;
+  maxHp: number;
   ageTitle: string;
   canTrainVillager: boolean;
   villagerWoodCost: number;
@@ -118,31 +123,40 @@ export interface TownHallHudSnapshot {
   activeTaskLabel: string | null;
   activeProgressRatio: number;
   activeRemainingSec: number;
+  garrison: BuildingGarrisonSnapshot;
 }
 
 export interface TownHallConfig {
-  /** Sol-üst (kuzey) başlangıç karosu (varsayılan: 9, 5 -> 9..11 x 5..7) */
+  id?: string;
   originCol: number;
   originRow: number;
   footprintCols?: number;
   footprintRows?: number;
   initialAge?: SettlementAgeId;
+  maxHp?: number;
 }
 
 /** Haritanın tam merkezinde, depo (7,6) ve koruluğa komşu anıtsal 3x3 yerleşim konumu */
 export const DEFAULT_TOWN_HALL_CONFIG: TownHallConfig = {
+  id: 'town_hall_main',
   originCol: 9,
   originRow: 5,
   footprintCols: 3,
   footprintRows: 3,
   initialAge: 'age_1_bozkir_obasi',
+  maxHp: 1200,
 };
 
 export type TownHallTaskCompletedCallback = (
   task: TownHallTaskDefinition
 ) => void;
 
-export class TownHall {
+export class TownHall implements GarrisonableBuilding {
+  public readonly id: string;
+  public readonly buildingName = 'Town Hall';
+  public readonly buildingSubtitle = 'Hükümdar Konağı';
+  public readonly garrison: BuildingGarrisonController;
+
   private readonly scene: Phaser.Scene;
   private readonly isoGrid: IsoGrid;
   private readonly woodDepot: WoodDepot;
@@ -151,10 +165,16 @@ export class TownHall {
   private readonly footprintCols: number;
   private readonly footprintRows: number;
 
+  private hp: number;
+  private readonly maxHp: number;
+
   private readonly shadowGraphics: Phaser.GameObjects.Graphics;
   private readonly selectionGraphics: Phaser.GameObjects.Graphics;
   private readonly sprite: Phaser.GameObjects.Image;
   private readonly progressGraphics: Phaser.GameObjects.Graphics;
+  private readonly garrisonBadgeBg: Phaser.GameObjects.Graphics;
+  private readonly garrisonBadgeText: Phaser.GameObjects.Text;
+  private lastBadgeCount = -1;
 
   private selected = false;
   private currentAge: SettlementAgeId;
@@ -171,6 +191,7 @@ export class TownHall {
     woodDepot: WoodDepot,
     config: TownHallConfig = DEFAULT_TOWN_HALL_CONFIG
   ) {
+    this.id = config.id ?? 'town_hall_main';
     this.scene = scene;
     this.isoGrid = isoGrid;
     this.woodDepot = woodDepot;
@@ -179,8 +200,19 @@ export class TownHall {
     this.footprintCols = config.footprintCols ?? 3;
     this.footprintRows = config.footprintRows ?? 3;
     this.currentAge = config.initialAge ?? 'age_1_bozkir_obasi';
+    this.maxHp = config.maxHp ?? 1200;
+    this.hp = this.maxHp;
 
-    // Varsayılan birim üretim görevini kaydet (ileride teknoloji ve çağ görevleri de buraya eklenir)
+    // Katı kapasite sınırı olmadan (50+ kişilik ordular dahil) tüm birimleri kabul eden garnizon
+    this.garrison = new BuildingGarrisonController({
+      buildingId: this.id,
+      buildingName: this.buildingName,
+      allowedCategories: ['villager', 'warrior', 'commander'],
+      maxCapacity: null,
+      healHpPerSecond: 2.5,
+      satietyPerFoodUnit: 25,
+    });
+
     this.registerTaskDefinition({
       id: TRAIN_VILLAGER_TASK_ID,
       kind: 'unit_production',
@@ -217,18 +249,31 @@ export class TownHall {
     this.sprite.setDepth(sortDepth);
 
     this.progressGraphics = scene.add.graphics();
-    this.progressGraphics.setPosition(worldPos.x, worldPos.y - 68);
+    this.progressGraphics.setPosition(worldPos.x, worldPos.y - 108);
     this.progressGraphics.setDepth(sortDepth + 120);
     this.progressGraphics.setVisible(false);
+
+    this.garrisonBadgeBg = scene.add.graphics();
+    this.garrisonBadgeBg.setPosition(worldPos.x, worldPos.y - 94);
+    this.garrisonBadgeBg.setDepth(sortDepth + 118);
+    this.garrisonBadgeBg.setVisible(false);
+
+    this.garrisonBadgeText = scene.add
+      .text(worldPos.x, worldPos.y - 94, '', {
+        fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+        fontSize: '10px',
+        fontStyle: 'bold',
+        color: '#fef3c7',
+      })
+      .setOrigin(0.5, 0.5)
+      .setDepth(sortDepth + 119)
+      .setVisible(false);
   }
 
   public static preload(scene: Phaser.Scene): void {
     scene.load.image(TOWN_HALL_TEXTURE_KEY, TOWN_HALL_ASSET_PATH);
   }
 
-  /**
-   * İleride yeni birim, teknoloji araştırması veya çağ geliştirme görevi eklemek için kayıt metodu.
-   */
   public registerTaskDefinition(definition: TownHallTaskDefinition): void {
     this.taskRegistry.set(definition.id, definition);
   }
@@ -272,7 +317,6 @@ export class TownHall {
     return this.selected;
   }
 
-  /** 3x3 tabanın sürekli (merkez) karo koordinatını döndürür (ör. 10, 6). */
   public getCenterTile(): GridCoord {
     return {
       col: this.originCol + (this.footprintCols - 1) * 0.5,
@@ -285,9 +329,6 @@ export class TownHall {
     return this.isoGrid.tileToWorld(center.col, center.row);
   }
 
-  /**
-   * Verilen tam sayı (col, row) karosunun Town Hall'un 3x3 tabanı içinde olup olmadığını döndürür.
-   */
   public occupiesTile(col: number, row: number): boolean {
     return (
       col >= this.originCol &&
@@ -297,10 +338,6 @@ export class TownHall {
     );
   }
 
-  /**
-   * Dünya koordinatındaki (worldX, worldY) tıklama/dokunmanın Town Hall binası
-   * üzerine isabet edip etmediğini kontrol eder (izometrik taban + gövde/kubbe).
-   */
   public containsWorldPoint(
     worldX: number,
     worldY: number,
@@ -311,31 +348,65 @@ export class TownHall {
     const dx = worldX - center.x;
     const dy = worldY - center.y;
 
-    // 1) 3x3 izometrik taş kaide elması (yarı genişlik 96, yarı yükseklik 48)
+    // 1) 3x3 izometrik taş ve kızıl tuğla kaide elması
     const diamondHit =
-      Math.abs(dx) / (96 + pad) + Math.abs(dy - 2) / (50 + pad) <= 1.0;
+      Math.abs(dx) / (98 + pad) + Math.abs(dy - 2) / (51 + pad) <= 1.0;
     if (diamondHit) {
       return true;
     }
 
-    // 2) Üst duvarlar, eyvan kapısı, kuleler ve turkuaz kubbe silüeti
+    // 2) Ahşap sütunlu gövde ve kademeli konak çatısı
     return (
-      Math.abs(dx) <= 66 + pad &&
-      dy >= -64 - pad &&
-      dy <= 26 + pad
+      Math.abs(dx) <= 72 + pad &&
+      dy >= -96 - pad &&
+      dy <= 28 + pad
     );
   }
 
   /**
-   * Yeni üretilen köylünün binanın hemen yanında (ön merdiven meydanından başlayarak)
-   * ortaya çıkabileceği aday ızgara noktalarını öncelik sırasıyla döndürür.
+   * Birimlerin binaya girmek üzere yönlendirileceği ön merdiven ve çevre yaklaşım noktaları.
+   */
+  public getEntranceApproachSpots(): GridCoord[] {
+    const cMid = this.originCol + (this.footprintCols - 1) * 0.5; // 10
+    const stairRow = this.originRow + this.footprintRows - 1 + 0.9; // 7.9
+
+    return [
+      { col: cMid, row: stairRow },
+      { col: cMid - 0.65, row: stairRow },
+      { col: cMid + 0.65, row: stairRow },
+      { col: cMid - 1.25, row: stairRow - 0.1 },
+      { col: cMid + 1.25, row: stairRow - 0.1 },
+      { col: this.originCol - 0.88, row: this.originRow + 1.6 },
+      { col: this.originCol + this.footprintCols - 1 + 0.88, row: this.originRow + 1.6 },
+    ];
+  }
+
+  /**
+   * Binaya giriş emri almış bir birimin kapı/merdiven eşiğine ulaşıp ulaşmadığını kontrol eder.
+   */
+  public isNearEntranceForEntry(pos: GridCoord): boolean {
+    const minC = this.originCol - 1.32;
+    const maxC = this.originCol + this.footprintCols - 1 + 1.32;
+    const minR = this.originRow - 1.32;
+    const maxR = this.originRow + this.footprintRows - 1 + 1.38;
+
+    return (
+      pos.col >= minC &&
+      pos.col <= maxC &&
+      pos.row >= minR &&
+      pos.row <= maxR
+    );
+  }
+
+  /**
+   * Yeni üretilen veya garnizondan çıkan birimlerin yerleşeceği öncelikli açık noktalar.
    */
   public getSpawnCandidateSpots(): GridCoord[] {
-    const cMid = this.originCol + (this.footprintCols - 1) * 0.5; // 10
-    const frontRow = this.originRow + this.footprintRows - 1 + 1.05; // 8.05 (ön merdiven önü)
-    const westCol = this.originCol - 0.92; // 8.08
-    const eastCol = this.originCol + this.footprintCols - 1 + 0.92; // 11.92
-    const backRow = this.originRow - 0.92; // 4.08
+    const cMid = this.originCol + (this.footprintCols - 1) * 0.5;
+    const frontRow = this.originRow + this.footprintRows - 1 + 1.05;
+    const westCol = this.originCol - 0.92;
+    const eastCol = this.originCol + this.footprintCols - 1 + 0.92;
+    const backRow = this.originRow - 0.92;
 
     return [
       { col: cMid, row: frontRow },
@@ -353,15 +424,10 @@ export class TownHall {
     ];
   }
 
-  /** Köylü üretimi için yeterli odun (20) ve kuyruk yeri olup olmadığını döndürür. */
   public canTrainVillager(): boolean {
     return this.canEnqueueTask(TRAIN_VILLAGER_TASK_ID).ok;
   }
 
-  /**
-   * "Köylü Üret" komutu: 20 odun harcayarak 5 saniyelik köylü üretimini kuyruğa alır.
-   * Yeterli odun yoksa false döner ve üretim başlatılmaz.
-   */
   public tryTrainVillager(): EnqueueTaskResult {
     return this.tryEnqueueTask(TRAIN_VILLAGER_TASK_ID);
   }
@@ -423,11 +489,15 @@ export class TownHall {
     return { ok: true };
   }
 
-  /**
-   * Kare bazlı üretim / araştırma sayacını ilerletir.
-   * Süresi (5000 ms) dolan görev tamamlandığında dinleyicileri tetikler.
-   */
-  public update(deltaMs: number): void {
+  public update(
+    deltaMs: number,
+    foodWallet?: SettlementFoodProvisionWallet
+  ): void {
+    // 1) İçerideki birimlerin can yenileme ve erzak güncellemesi
+    this.garrison.update(deltaMs, foodWallet);
+    this.refreshWorldGarrisonBadge();
+
+    // 2) Üretim / araştırma kuyruğu
     if (this.taskQueue.length === 0) {
       if (this.progressGraphics.visible) {
         this.progressGraphics.setVisible(false);
@@ -471,7 +541,12 @@ export class TownHall {
       : 0;
 
     return {
+      id: this.id,
+      buildingName: this.buildingName,
+      buildingSubtitle: this.buildingSubtitle,
       selected: this.selected,
+      hp: this.hp,
+      maxHp: this.maxHp,
       ageTitle: SETTLEMENT_AGES[this.currentAge].title,
       canTrainVillager: this.canTrainVillager(),
       villagerWoodCost: VILLAGER_PRODUCTION_WOOD_COST,
@@ -481,7 +556,13 @@ export class TownHall {
       activeTaskLabel: active ? active.definition.label : null,
       activeProgressRatio: ratio,
       activeRemainingSec: remainingSec,
+      garrison: this.garrison.getSnapshot(),
     };
+  }
+
+  public playGarrisonPulse(): void {
+    this.playOrderPulse();
+    this.refreshWorldGarrisonBadge();
   }
 
   public ignoreOnCamera(camera: Phaser.Cameras.Scene2D.Camera): void {
@@ -490,6 +571,8 @@ export class TownHall {
       this.selectionGraphics,
       this.sprite,
       this.progressGraphics,
+      this.garrisonBadgeBg,
+      this.garrisonBadgeText,
     ]);
   }
 
@@ -497,10 +580,13 @@ export class TownHall {
     this.pulseTween?.stop();
     this.completionListeners.clear();
     this.taskQueue.length = 0;
+    this.garrison.clearAllWithoutEject();
     this.shadowGraphics.destroy();
     this.selectionGraphics.destroy();
     this.sprite.destroy();
     this.progressGraphics.destroy();
+    this.garrisonBadgeBg.destroy();
+    this.garrisonBadgeText.destroy();
   }
 
   private applyInternalTaskCompletion(task: TownHallTaskDefinition): void {
@@ -528,6 +614,34 @@ export class TownHall {
         }
       },
     });
+  }
+
+  private refreshWorldGarrisonBadge(): void {
+    const count = this.garrison.getCount();
+    if (count === this.lastBadgeCount) {
+      return;
+    }
+    this.lastBadgeCount = count;
+
+    if (count <= 0) {
+      this.garrisonBadgeBg.clear();
+      this.garrisonBadgeBg.setVisible(false);
+      this.garrisonBadgeText.setVisible(false);
+      return;
+    }
+
+    this.garrisonBadgeText.setText(`İçeride: ${count}`);
+    const w = Math.max(54, Math.ceil(this.garrisonBadgeText.width + 14));
+    const h = 16;
+
+    this.garrisonBadgeBg.clear();
+    this.garrisonBadgeBg.fillStyle(0x1e293b, 0.9);
+    this.garrisonBadgeBg.fillRoundedRect(-w * 0.5, -h * 0.5, w, h, 6);
+    this.garrisonBadgeBg.lineStyle(1.1, 0xf59e0b, 0.92);
+    this.garrisonBadgeBg.strokeRoundedRect(-w * 0.5, -h * 0.5, w, h, 6);
+
+    this.garrisonBadgeBg.setVisible(true);
+    this.garrisonBadgeText.setVisible(true);
   }
 
   private refreshWorldProgressBar(): void {
@@ -577,10 +691,10 @@ export class TownHall {
 
   private drawGroundContactShadow(): void {
     this.shadowGraphics.clear();
-    const hw = 98;
-    const hh = 50;
+    const hw = 100;
+    const hh = 51;
 
-    this.shadowGraphics.fillStyle(0x0d190a, 0.24);
+    this.shadowGraphics.fillStyle(0x0d190a, 0.25);
     this.shadowGraphics.beginPath();
     this.shadowGraphics.moveTo(0, -hh + 2);
     this.shadowGraphics.lineTo(hw, 3);
@@ -592,8 +706,8 @@ export class TownHall {
 
   private drawSelectionDiamond(): void {
     this.selectionGraphics.clear();
-    const hw = 100;
-    const hh = 51;
+    const hw = 101;
+    const hh = 52;
 
     this.selectionGraphics.fillStyle(0x22c55e, 0.09);
     this.selectionGraphics.beginPath();

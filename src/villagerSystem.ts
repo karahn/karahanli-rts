@@ -1,14 +1,13 @@
 /**
- * Karahanlı RTS — Çoklu Birim Seçim, Grup Hareketi, Odun Toplama ve Town Hall Koordinasyon Sistemi
+ * Karahanlı RTS — Birim Seçim, Grup Hareketi, Odun Toplama ve Garnizon Koordinasyon Sistemi
  *
- * Sahnedeki tüm Karahanlı köylü birimlerini hem tekli hem çoklu seçimle yönetir ve
- * Town Hall (ana merkez binası) seçimi ile yeni köylü üretimini koordine eder:
- * - Masaüstünde: Sol tıkla tekli köylü veya Town Hall seçimi, Sol sürüklemeyle yeşil
- *   seçim dikdörtgeni (marquee box) ile çoklu köylü seçimi
- * - Mobilde: Town Hall'a dokunarak üretim panelini açma, "Kutu Seç" ve "Tümünü Seç" araçları
- * - Town Hall'da 5 saniyelik üretim tamamlandığında yeni köylüyü binanın hemen yanında
- *   ortaya çıkarma ve tüm seçim/hareket/odun toplama sistemlerine otomatik dahil etme
- * - Hareket esnasında ve varışta dinamik birim ayrışması ile üst üste binmeyi önleme
+ * Sahnedeki tüm birimleri tekli/çoklu seçimle yönetir ve modüler garnizon binalarıyla
+ * (Town Hall ve ileride Kışla, Kale, Savunma Kulesi) tam entegre çalışır:
+ * - Seçili birim(ler) varken Town Hall'a sağ tıklanınca (mobilde dokunulunca veya
+ *   paneldeki "Binaya Gir" butonuyla) birimler girişe yürür ve içeri girer
+ * - İçerideki birimler haritada görünmez, kaynak toplamaz; verileri korunur ve can yeniler
+ * - 50+ kişilik ordular dahil tek tek veya topluca dışarı çıkarılabilir
+ * - Alt bilgi paneli için tekli birim, çoklu birim ve yerleşim özet verilerini üretir
  */
 
 import Phaser from 'phaser';
@@ -16,9 +15,12 @@ import { MapCameraController } from './cameraController';
 import {
   ForestSystem,
   TreeResourceNode,
-  TreeType,
   WoodHarvestResult,
 } from './forestSystem';
+import {
+  BuildingGarrisonController,
+  GarrisonableBuilding,
+} from './garrisonSystem';
 import { IsoGrid } from './isoGrid';
 import {
   findSmoothGridPath,
@@ -26,6 +28,11 @@ import {
   GridObstacleQuery,
 } from './pathfinding';
 import { TRAIN_VILLAGER_TASK_ID, TownHall } from './townHall';
+import {
+  CarriedResourceSummary,
+  UnitCategory,
+  UnitNutritionState,
+} from './unitTypes';
 import {
   Villager,
   VillagerConfig,
@@ -62,33 +69,38 @@ export const INITIAL_VILLAGER_SPAWNS: readonly VillagerConfig[] = [
   },
 ];
 
-/** Ağaç gövdesi ve odun deposu kenarında durmak için ideal ızgara mesafesi (> 0.78 engel yarıçapı) */
 const INTERACT_STAND_RADIUS = 0.86;
-
-/** İki köylünün hedef/duruş noktaları arasındaki minimum ızgara aralığı */
 const MIN_VILLAGER_SEPARATION = 0.62;
-
-/** Yürüyüş esnasında köylülerin birbirinin üstüne binmesini önleyen dinamik ayrışma yarıçapı */
 const DYNAMIC_SEPARATION_RADIUS = 0.64;
-
-/** Grup yürüyüşünde formasyon noktaları arasındaki ızgara mesafesi */
 const FORMATION_SPACING = 0.86;
-
-/** Seçim dikdörtgenini (marquee) başlatmak için minimum sürükleme eşiği (ekran px) */
 const MARQUEE_DRAG_THRESHOLD_PX = 7;
-
-/** Köylü üzerine çift tıklama / çift dokunma ile tümünü seçme süresi (ms) */
 const DOUBLE_TAP_WINDOW_MS = 350;
 
-export interface SelectedVillagerHudInfo {
+export interface SingleUnitPanelInfo {
   id: string;
   displayName: string;
-  carriedWood: number;
-  maxCapacity: number;
+  unitTypeLabel: string;
+  category: UnitCategory;
+  hp: number;
+  maxHp: number;
+  attackDamage: number;
+  defenseArmor: number;
+  combatSystemActive: boolean;
+  nutrition: UnitNutritionState;
+  carriedResource: CarriedResourceSummary;
+  taskDescription: string;
   state: VillagerState;
-  targetTreeType: TreeType | null;
-  targetTreeWood: number | null;
-  targetTreeMaxWood: number | null;
+}
+
+export interface MultiSelectedUnitIconItem {
+  id: string;
+  displayName: string;
+  shortTag: string;
+  category: UnitCategory;
+  hp: number;
+  maxHp: number;
+  carriedWood: number;
+  state: VillagerState;
 }
 
 export interface MultiSelectedHudInfo {
@@ -97,16 +109,19 @@ export interface MultiSelectedHudInfo {
   totalCapacity: number;
   choppingCount: number;
   movingCount: number;
+  units: MultiSelectedUnitIconItem[];
 }
 
 export interface VillagerHudStatus {
   totalStoredWood: number;
   totalVillagersCount: number;
+  fieldVillagersCount: number;
+  garrisonedVillagersCount: number;
   workingVillagersCount: number;
   remainingTreesCount: number;
   selectedCount: number;
   touchBoxSelectMode: boolean;
-  selectedVillager: SelectedVillagerHudInfo | null;
+  selectedUnit: SingleUnitPanelInfo | null;
   multiSelected: MultiSelectedHudInfo | null;
 }
 
@@ -120,14 +135,13 @@ export class VillagerSystem {
   private readonly worldContext: VillagerWorldContext;
 
   private readonly villagers = new Map<string, Villager>();
+  private readonly garrisonBuildings = new Map<string, GarrisonableBuilding>();
   private readonly selectedVillagerIds = new Set<string>();
   private readonly ignoredWorldCameras = new Set<Phaser.Cameras.Scene2D.Camera>();
   private nextVillagerNumber = 1;
 
-  /** Arayüz butonlarının ekran alanlarını kontrol ederek haritaya tıklama sızmasını önler */
   private isScreenUiBlocked?: (screenX: number, screenY: number) => boolean;
 
-  /** Seçim dikdörtgeni (marquee box) durumu — ekran koordinatlarında çizilir */
   private readonly marqueeGraphics: Phaser.GameObjects.Graphics;
   private isMarqueeCandidate = false;
   private isMarqueeDragging = false;
@@ -137,10 +151,7 @@ export class VillagerSystem {
   private marqueeAdditive = false;
   private marqueeBaseSelection = new Set<string>();
 
-  /** Mobil dokunmatik için kutu seçim modu ("Kutu Seç" butonuyla açılır/kapanır) */
   private touchBoxSelectMode = false;
-
-  /** Çift tık / çift dokunma takibi */
   private lastVillagerTapTime = 0;
   private lastTappedVillagerId: string | null = null;
 
@@ -162,6 +173,7 @@ export class VillagerSystem {
     this.townHall = townHall;
     this.cameraController = cameraController;
 
+    this.registerGarrisonableBuilding(townHall);
     Villager.ensureAnimations(scene);
 
     this.worldContext = {
@@ -171,6 +183,16 @@ export class VillagerSystem {
         this.buildPathToTileAdjacent(villager, tree.tile),
       planPathToDepot: (villager) =>
         this.buildPathToTileAdjacent(villager, this.woodDepot.getTile()),
+      canEnterBuildingNow: (villager, buildingId) => {
+        const b = this.garrisonBuildings.get(buildingId);
+        if (!b || !b.garrison.canAcceptUnit(villager)) {
+          return false;
+        }
+        return b.isNearEntranceForEntry(villager.getGridPosition());
+      },
+      completeEnterBuilding: (villager, buildingId) =>
+        this.finalizeUnitEnterBuilding(villager, buildingId),
+      isFoodEconomyActive: () => false,
       onWoodHarvested: (villager, result) => {
         this.spawnWoodHarvestPop(villager, result);
       },
@@ -179,7 +201,6 @@ export class VillagerSystem {
       },
     };
 
-    // Town Hall'da köylü üretimi tamamlandığında (5 sn) binanın yanında yeni köylü çıkar
     this.townHall.onTaskCompleted((task) => {
       if (task.id === TRAIN_VILLAGER_TASK_ID) {
         this.spawnVillagerFromTownHall();
@@ -190,12 +211,10 @@ export class VillagerSystem {
     this.moveMarker.setDepth(5);
     this.moveMarker.setVisible(false);
 
-    // Seçim dikdörtgeni HUD kamerasında 1:1 ekran pikselleriyle keskin çizilir
     this.marqueeGraphics = scene.add.graphics();
     this.marqueeGraphics.setDepth(4990);
     this.marqueeGraphics.setVisible(false);
 
-    // Mobil kutu seçim modu aktifken veya HUD butonuna basıldığında kamera sürüklemesini durdur
     this.cameraController.setPointerDragSuppression((pointer) => {
       if (this.isScreenUiBlocked?.(pointer.x, pointer.y)) {
         return true;
@@ -214,24 +233,22 @@ export class VillagerSystem {
   }
 
   /**
-   * Üst/alt HUD butonlarının ekran koordinatlarını tık sızmasına karşı tanıtır.
+   * İleride eklenecek Kışla, Kale veya Savunma Kulesi binalarını garnizon sistemine kaydeder.
    */
+  public registerGarrisonableBuilding(building: GarrisonableBuilding): void {
+    this.garrisonBuildings.set(building.id, building);
+  }
+
   public setUiHitBlocker(
     predicate: (screenX: number, screenY: number) => boolean
   ): void {
     this.isScreenUiBlocked = predicate;
   }
 
-  /**
-   * Ana dünya kamerasının yok sayması gereken ekran üstü (HUD) çizim nesnelerini döndürür.
-   */
   public getScreenOverlayObjects(): Phaser.GameObjects.GameObject[] {
     return [this.marqueeGraphics];
   }
 
-  /**
-   * Mobil dokunmatik kutu seçim modunu açar/kapatır.
-   */
   public setTouchBoxSelectMode(enabled: boolean): void {
     this.touchBoxSelectMode = enabled;
     if (enabled) {
@@ -251,18 +268,12 @@ export class VillagerSystem {
     return this.touchBoxSelectMode;
   }
 
-  /**
-   * Başlangıçtaki Karahanlı köylülerini (varsayılan: 3 köylü) sahneye yerleştirir.
-   */
   public spawnInitialVillagers(
     configs: readonly VillagerConfig[] = INITIAL_VILLAGER_SPAWNS
   ): Villager[] {
     return configs.map((cfg) => this.addVillager(cfg));
   }
 
-  /**
-   * Yeni bir köylü oluşturup sisteme kaydeder.
-   */
   public addVillager(config: VillagerConfig): Villager {
     if (this.villagers.has(config.id)) {
       throw new Error(`Köylü kimliği zaten kullanımda: ${config.id}`);
@@ -282,10 +293,6 @@ export class VillagerSystem {
     return villager;
   }
 
-  /**
-   * Town Hall üretimi tamamlandığında binanın hemen yanındaki uygun açık noktada
-   * yeni bir köylü oluşturur.
-   */
   public spawnVillagerFromTownHall(): Villager {
     let serial = this.nextVillagerNumber;
     while (this.villagers.has(`villager_${serial}`)) {
@@ -293,7 +300,8 @@ export class VillagerSystem {
     }
     this.nextVillagerNumber = serial + 1;
 
-    const spawnSpot = this.findOpenTownHallSpawnSpot();
+    const spawnSpots = this.findOpenSpawnSpotsForBatch(this.townHall, 1);
+    const spawnSpot = spawnSpots[0];
     const newVillager = this.addVillager({
       id: `villager_${serial}`,
       displayName: `Köylü ${serial}`,
@@ -318,15 +326,186 @@ export class VillagerSystem {
       }
     }
 
-    this.spawnNewVillagerPop(newVillager);
+    this.spawnFloatingText(
+      newVillager.getWorldPosition().x,
+      newVillager.getWorldPosition().y - 38,
+      `+1 ${newVillager.displayName}`,
+      '#86efac'
+    );
     return newVillager;
   }
 
+  // --- Garnizon Giriş ve Çıkış Komutları ---
+
   /**
-   * Yalnızca belirtilen kimlikteki tek köylüyü seçer (Town Hall seçimini kapatır).
+   * Seçili tüm birimlere (ve komutan varsa ona bağlı askerlere) belirtilen binaya
+   * yürüyüp içeri girme emri verir.
    */
+  public commandEnterSelectedIntoBuilding(
+    buildingId: string = this.townHall.id
+  ): boolean {
+    const building = this.garrisonBuildings.get(buildingId);
+    if (!building) {
+      return false;
+    }
+
+    const rawSelected = this.getSelectedVillagers();
+    if (rawSelected.length === 0) {
+      return false;
+    }
+
+    // Komutan seçiliyse bağlı tüm askerlerini de otomatik olarak dahil et
+    const marchingUnits = BuildingGarrisonController.expandWithCommanderRetinue(
+      rawSelected,
+      (id) => this.villagers.get(id)
+    );
+
+    if (marchingUnits.length === 0) {
+      return false;
+    }
+
+    const entranceSpots = building.getEntranceApproachSpots();
+    const obstacleQuery = this.createObstacleQuery();
+    let anyOrdered = false;
+
+    for (let i = 0; i < marchingUnits.length; i += 1) {
+      const unit = marchingUnits[i];
+      if (!building.garrison.canAcceptUnit(unit)) {
+        continue;
+      }
+
+      const startPos = unit.getGridPosition();
+      if (building.isNearEntranceForEntry(startPos)) {
+        this.finalizeUnitEnterBuilding(unit, building.id);
+        anyOrdered = true;
+        continue;
+      }
+
+      const targetEntrance = entranceSpots[i % entranceSpots.length];
+      const waypoints = findSmoothGridPath(
+        startPos,
+        targetEntrance,
+        obstacleQuery
+      );
+      unit.setEnterBuildingOrder(
+        building.id,
+        building.buildingName,
+        waypoints,
+        this.worldContext
+      );
+      anyOrdered = true;
+    }
+
+    if (anyOrdered && building.id === this.townHall.id) {
+      const thPos = this.townHall.getWorldPosition();
+      this.playOrderFeedback(thPos.x - 24, thPos.y + 18, 0xf59e0b);
+    }
+
+    return anyOrdered;
+  }
+
+  /**
+   * Town Hall içinden belirli kimlikteki birimi veya sıradaki ilk birimi dışarı çıkarır.
+   */
+  public ejectOneFromTownHall(unitId?: string): Villager | null {
+    if (this.townHall.garrison.getCount() === 0) {
+      return null;
+    }
+
+    const spots = this.findOpenSpawnSpotsForBatch(this.townHall, 1);
+    const ejected = unitId
+      ? this.townHall.garrison.ejectUnit(unitId, spots[0])
+      : this.townHall.garrison.ejectFirstUnit(spots[0]);
+
+    if (!ejected) {
+      return null;
+    }
+
+    this.townHall.playGarrisonPulse();
+    const unit = this.villagers.get(ejected.id) ?? null;
+    if (unit) {
+      const pos = unit.getWorldPosition();
+      this.spawnFloatingText(
+        pos.x,
+        pos.y - 36,
+        `${unit.displayName} Çıktı`,
+        '#fde68a'
+      );
+    }
+    return unit;
+  }
+
+  /**
+   * Town Hall içindeki tüm birimleri (50+ kişilik ordular dahil) bina önündeki
+   * açık meydan noktalarına topluca dışarı çıkarır.
+   */
+  public ejectAllFromTownHall(): Villager[] {
+    const count = this.townHall.garrison.getCount();
+    if (count === 0) {
+      return [];
+    }
+
+    const ejectedList = this.townHall.garrison.ejectAllUnits((n) =>
+      this.findOpenSpawnSpotsForBatch(this.townHall, n)
+    );
+
+    if (ejectedList.length > 0) {
+      this.townHall.playGarrisonPulse();
+      const thPos = this.townHall.getWorldPosition();
+      this.spawnFloatingText(
+        thPos.x,
+        thPos.y - 44,
+        `${ejectedList.length} Birim Çıktı`,
+        '#fde68a'
+      );
+    }
+
+    const units: Villager[] = [];
+    for (const item of ejectedList) {
+      const v = this.villagers.get(item.id);
+      if (v) {
+        units.push(v);
+      }
+    }
+    return units;
+  }
+
+  private finalizeUnitEnterBuilding(
+    villager: Villager,
+    buildingId: string
+  ): boolean {
+    const building = this.garrisonBuildings.get(buildingId);
+    if (!building) {
+      return false;
+    }
+
+    const entered = building.garrison.enterUnit(villager);
+    if (!entered) {
+      return false;
+    }
+
+    this.selectedVillagerIds.delete(villager.id);
+    this.syncSelectionRings();
+
+    if (building.id === this.townHall.id) {
+      this.townHall.playGarrisonPulse();
+      const thPos = this.townHall.getWorldPosition();
+      this.spawnFloatingText(
+        thPos.x - 18,
+        thPos.y - 26,
+        `${villager.displayName} Girdi`,
+        '#93c5fd'
+      );
+    }
+
+    return true;
+  }
+
+  // --- Seçim Metotları ---
+
   public selectSingleVillager(id: string): void {
-    if (!this.villagers.has(id)) {
+    const unit = this.villagers.get(id);
+    if (!unit || unit.isGarrisoned()) {
       return;
     }
     this.townHall.setSelected(false);
@@ -335,15 +514,13 @@ export class VillagerSystem {
     this.syncSelectionRings();
   }
 
-  /**
-   * Birden fazla köylüyü aynı anda seçer (additive=true ise mevcut seçime ekler).
-   */
   public selectVillagers(ids: Iterable<string>, additive = false): void {
     if (!additive) {
       this.selectedVillagerIds.clear();
     }
     for (const id of ids) {
-      if (this.villagers.has(id)) {
+      const unit = this.villagers.get(id);
+      if (unit && !unit.isGarrisoned()) {
         this.selectedVillagerIds.add(id);
       }
     }
@@ -353,11 +530,9 @@ export class VillagerSystem {
     this.syncSelectionRings();
   }
 
-  /**
-   * Belirtilen köylünün seçili durumunu tersine çevirir (Shift+Tık veya mobil çoklu seçim).
-   */
   public toggleVillagerSelection(id: string): void {
-    if (!this.villagers.has(id)) {
+    const unit = this.villagers.get(id);
+    if (!unit || unit.isGarrisoned()) {
       return;
     }
     if (this.selectedVillagerIds.has(id)) {
@@ -370,37 +545,37 @@ export class VillagerSystem {
   }
 
   /**
-   * Haritadaki tüm köylüleri seçer ve yeşil seçim halkalarını gösterir.
+   * Haritada dışarıda bulunan tüm köylüleri seçer (bina içindekiler hariç).
    */
   public selectAllVillagers(): void {
     this.townHall.setSelected(false);
     this.selectedVillagerIds.clear();
-    for (const id of this.villagers.keys()) {
-      this.selectedVillagerIds.add(id);
+    for (const [id, unit] of this.villagers.entries()) {
+      if (!unit.isGarrisoned()) {
+        this.selectedVillagerIds.add(id);
+      }
     }
     this.syncSelectionRings();
   }
 
-  /** Town Hall'u seçer ve köylü seçimini temizler. */
   public selectTownHall(): void {
+    this.touchBoxSelectMode = false;
     this.selectedVillagerIds.clear();
     this.syncSelectionRings();
     this.townHall.setSelected(true);
   }
 
-  /** Tüm köylülerin ve Town Hall'un seçimini kaldırır (devam eden görevleri etkilemez). */
   public clearSelection(): void {
     this.selectedVillagerIds.clear();
     this.townHall.setSelected(false);
     this.syncSelectionRings();
   }
 
-  /** Şu anda seçili olan tüm köylüleri döndürür. */
   public getSelectedVillagers(): Villager[] {
     const result: Villager[] = [];
     for (const id of this.selectedVillagerIds) {
       const unit = this.villagers.get(id);
-      if (unit) {
+      if (unit && !unit.isGarrisoned()) {
         result.push(unit);
       }
     }
@@ -408,49 +583,65 @@ export class VillagerSystem {
   }
 
   public getSelectedCount(): number {
-    return this.selectedVillagerIds.size;
+    return this.getSelectedVillagers().length;
   }
 
-  /** Haritadaki tüm köylüleri döndürür. */
   public getAllVillagers(): Villager[] {
     return Array.from(this.villagers.values());
   }
 
-  /**
-   * Üst arayüzde (HUD) ortak toplam depo odununu, tekli veya çoklu seçili köylülerin
-   * durumunu göstermek için özet veri döner.
-   */
   public getHudStatus(): VillagerHudStatus {
+    let fieldCount = 0;
+    let garrisonCount = 0;
     let workingCount = 0;
+
     for (const unit of this.villagers.values()) {
-      if (unit.getState() !== 'idle') {
-        workingCount += 1;
+      if (unit.isGarrisoned()) {
+        garrisonCount += 1;
+      } else {
+        fieldCount += 1;
+        if (unit.getState() !== 'idle') {
+          workingCount += 1;
+        }
       }
     }
 
+    const resolveTreeLabel = (treeId: string): string | null => {
+      const tree = this.forestSystem.getTree(treeId);
+      if (!tree) {
+        return null;
+      }
+      const name = tree.treeType === 'cam' ? 'Çam' : 'Kayın';
+      return `${name}: ${tree.woodAmount}/${tree.maxWoodAmount}`;
+    };
+
     const selectedUnits = this.getSelectedVillagers();
-    let singleInfo: SelectedVillagerHudInfo | null = null;
+    let singleInfo: SingleUnitPanelInfo | null = null;
     let multiInfo: MultiSelectedHudInfo | null = null;
 
     if (selectedUnits.length === 1) {
-      const selected = selectedUnits[0];
-      const treeId = selected.getTargetTreeId();
-      const targetTree = treeId ? this.forestSystem.getTree(treeId) : undefined;
+      const u = selectedUnits[0];
       singleInfo = {
-        id: selected.id,
-        displayName: selected.displayName,
-        carriedWood: selected.getCarriedWood(),
-        maxCapacity: selected.getMaxWoodCapacity(),
-        state: selected.getState(),
-        targetTreeType: targetTree?.treeType ?? null,
-        targetTreeWood: targetTree ? targetTree.woodAmount : null,
-        targetTreeMaxWood: targetTree ? targetTree.maxWoodAmount : null,
+        id: u.id,
+        displayName: u.displayName,
+        unitTypeLabel: u.unitTypeLabel,
+        category: u.unitCategory,
+        hp: u.getHp(),
+        maxHp: u.getMaxHp(),
+        attackDamage: u.getAttackDamage(),
+        defenseArmor: u.getDefenseArmor(),
+        combatSystemActive: u.isCombatSystemActive(),
+        nutrition: u.getNutritionState(),
+        carriedResource: u.getCarriedResourceSummary(),
+        taskDescription: u.getTaskDescription(resolveTreeLabel),
+        state: u.getState(),
       };
     } else if (selectedUnits.length > 1) {
       let totalCarried = 0;
       let totalCap = 0;
       let chopping = 0;
       let moving = 0;
+      const items: MultiSelectedUnitIconItem[] = [];
 
       for (const u of selectedUnits) {
         totalCarried += u.getCarriedWood();
@@ -460,6 +651,18 @@ export class VillagerSystem {
         } else if (u.isMoving()) {
           moving += 1;
         }
+
+        const numMatch = /\d+$/.exec(u.id);
+        items.push({
+          id: u.id,
+          displayName: u.displayName,
+          shortTag: numMatch ? `#${numMatch[0]}` : u.displayName,
+          category: u.unitCategory,
+          hp: u.getHp(),
+          maxHp: u.getMaxHp(),
+          carriedWood: u.getCarriedWood(),
+          state: u.getState(),
+        });
       }
 
       multiInfo = {
@@ -468,24 +671,26 @@ export class VillagerSystem {
         totalCapacity: totalCap,
         choppingCount: chopping,
         movingCount: moving,
+        units: items,
       };
     }
 
     return {
       totalStoredWood: this.woodDepot.getStoredWood(),
       totalVillagersCount: this.villagers.size,
+      fieldVillagersCount: fieldCount,
+      garrisonedVillagersCount: garrisonCount,
       workingVillagersCount: workingCount,
       remainingTreesCount: this.forestSystem.getAllTrees().length,
       selectedCount: selectedUnits.length,
       touchBoxSelectMode: this.touchBoxSelectMode,
-      selectedVillager: singleInfo,
+      selectedUnit: singleInfo,
       multiSelected: multiInfo,
     };
   }
 
-  /**
-   * Seçili tüm köylülere verilen ağaca ayrı kenarlardan yürüyüp odun kesme emri verir.
-   */
+  // --- Kaynak Toplama, Teslim ve Yürüyüş Komutları ---
+
   public commandHarvestSelectedTree(tree: TreeResourceNode): boolean {
     const selected = this.getSelectedVillagers();
     if (selected.length === 0) {
@@ -545,9 +750,6 @@ export class VillagerSystem {
     return true;
   }
 
-  /**
-   * Seçili tüm köylülere ellerindeki odunu ortak depoya götürme emri verir.
-   */
   public commandDeliverSelectedToDepot(): boolean {
     const selected = this.getSelectedVillagers();
     if (selected.length === 0) {
@@ -592,10 +794,6 @@ export class VillagerSystem {
     return true;
   }
 
-  /**
-   * Seçili tek veya çoklu köylüleri verilen dünya koordinatına üst üste binmeyecek
-   * düzenli formasyon noktalarıyla yürütür.
-   */
   public commandMoveSelectedToWorld(worldX: number, worldY: number): boolean {
     const selected = this.getSelectedVillagers();
     if (selected.length === 0) {
@@ -672,44 +870,75 @@ export class VillagerSystem {
       unit.destroy();
     }
     this.villagers.clear();
+    this.garrisonBuildings.clear();
     this.selectedVillagerIds.clear();
     this.ignoredWorldCameras.clear();
   }
 
-  private findOpenTownHallSpawnSpot(): GridCoord {
-    const candidates = this.townHall.getSpawnCandidateSpots();
-    const emptySet = new Set<string>();
+  /**
+   * 1'den 50+ birime kadar toplu çıkış veya üretim için çakışmayan açık noktalar üretir.
+   */
+  private findOpenSpawnSpotsForBatch(
+    building: GarrisonableBuilding,
+    count: number
+  ): GridCoord[] {
+    const reserved: GridCoord[] = [];
+    const emptyIgnored = new Set<string>();
+    const candidates = building.getSpawnCandidateSpots();
 
     for (const spot of candidates) {
+      if (reserved.length >= count) {
+        return reserved;
+      }
       if (
         this.isContinuousPositionWalkable(spot.col, spot.row) &&
-        !this.isSpotCrowded('', spot, emptySet, [])
+        !this.isSpotCrowded('', spot, emptyIgnored, reserved)
       ) {
-        return { col: spot.col, row: spot.row };
+        reserved.push({ col: spot.col, row: spot.row });
       }
     }
 
-    const obstacleQuery = this.createObstacleQuery();
-    return this.findNearestValidGroundSpot(
-      candidates[0],
-      obstacleQuery,
-      emptySet,
-      []
-    );
+    // 50+ kişilik ordular çıktığında meydan halkalarını dışa doğru genişlet
+    const plazaCenter = candidates[0] ?? { col: 10, row: 8.2 };
+    for (let ring = 1; reserved.length < count && ring <= 14; ring += 1) {
+      const radius = 0.72 * ring;
+      const samples = Math.max(8, ring * 8);
+      for (let s = 0; s < samples && reserved.length < count; s += 1) {
+        const angle = (s / samples) * Math.PI * 2;
+        const candidate = this.isoGrid.clampContinuousTile(
+          plazaCenter.col + Math.cos(angle) * radius,
+          plazaCenter.row + Math.sin(angle) * radius,
+          0.3
+        );
+        if (
+          this.isContinuousPositionWalkable(candidate.col, candidate.row) &&
+          !this.isSpotCrowded('', candidate, emptyIgnored, reserved)
+        ) {
+          reserved.push(candidate);
+        }
+      }
+    }
+
+    while (reserved.length < count) {
+      reserved.push({
+        col: plazaCenter.col + ((reserved.length % 5) - 2) * 0.45,
+        row: plazaCenter.row + Math.floor(reserved.length / 5) * 0.45,
+      });
+    }
+
+    return reserved;
   }
 
   private syncSelectionRings(): void {
     for (const [vid, unit] of this.villagers.entries()) {
-      unit.setSelected(this.selectedVillagerIds.has(vid));
+      unit.setSelected(this.selectedVillagerIds.has(vid) && !unit.isGarrisoned());
     }
   }
 
-  /**
-   * Köylüler yürürken ve dururken birbirlerinin üstüne binmemeleri için kare bazlı
-   * yumuşak ve engel-güvenli ayrışma (steering separation) uygular.
-   */
   private applyDynamicUnitSeparation(deltaMs: number): void {
-    const units = Array.from(this.villagers.values());
+    const units = Array.from(this.villagers.values()).filter(
+      (u) => !u.isGarrisoned()
+    );
     if (units.length < 2) {
       return;
     }
@@ -796,10 +1025,6 @@ export class VillagerSystem {
     }
   }
 
-  /**
-   * Sürekli (floating-point) bir ızgara koordinatının harita sınırları içinde ve
-   * ağaç / odun deposu / Town Hall engellerinden güvenli mesafede olup olmadığını doğrular.
-   */
   private isContinuousPositionWalkable(col: number, row: number): boolean {
     const cols = this.isoGrid.getCols();
     const rows = this.isoGrid.getRows();
@@ -874,7 +1099,7 @@ export class VillagerSystem {
     const rightR = fwdC;
 
     const count = units.length;
-    const colsPerRow = Math.min(3, count);
+    const colsPerRow = Math.min(4, Math.max(3, Math.ceil(Math.sqrt(count))));
     const totalRows = Math.ceil(count / colsPerRow);
 
     const slots: GridCoord[] = [];
@@ -950,7 +1175,7 @@ export class VillagerSystem {
       return base;
     }
 
-    const radii = [0.68, 1.15, 1.65, 2.2, 2.8];
+    const radii = [0.68, 1.15, 1.65, 2.2, 2.8, 3.5];
     const angles = [0, 45, -45, 90, -90, 135, -135, 180];
     for (const radius of radii) {
       for (const deg of angles) {
@@ -1076,7 +1301,7 @@ export class VillagerSystem {
     }
 
     for (const [vid, other] of this.villagers.entries()) {
-      if (vid === requesterId || ignoredIds.has(vid)) {
+      if (vid === requesterId || ignoredIds.has(vid) || other.isGarrisoned()) {
         continue;
       }
 
@@ -1225,6 +1450,7 @@ export class VillagerSystem {
       isTouch
     );
     const now = this.scene.time.now;
+    const activeSelectedCount = this.getSelectedCount();
 
     if (isTouch) {
       // MOBİL DOKUNMATİK KONTROLLER:
@@ -1235,7 +1461,6 @@ export class VillagerSystem {
         return;
       }
 
-      // Köylüye dokunulduysa o köylüyü seç (çift dokunuşta tüm köylüleri seç)
       if (hitVillager) {
         if (
           this.lastTappedVillagerId === hitVillager.id &&
@@ -1251,13 +1476,18 @@ export class VillagerSystem {
         return;
       }
 
-      // Town Hall binasına dokunulduysa Town Hall'u seç ve "Köylü Üret" panelini aç
       if (hitTownHall) {
-        this.selectTownHall();
+        // Mobilde seçili birim(ler) varken Town Hall'a dokunulursa içeri girme emri verir;
+        // seçili birim yokken dokunulursa Town Hall yönetim panelini açar
+        if (activeSelectedCount > 0) {
+          this.commandEnterSelectedIntoBuilding(this.townHall.id);
+        } else {
+          this.selectTownHall();
+        }
         return;
       }
 
-      if (this.selectedVillagerIds.size > 0) {
+      if (activeSelectedCount > 0) {
         const hitTree = this.forestSystem.pickTreeAtWorld(
           worldPt.x,
           worldPt.y,
@@ -1279,7 +1509,6 @@ export class VillagerSystem {
           this.clearSelection();
         }
       } else if (this.townHall.isSelected()) {
-        // Town Hall seçiliyken boş zemine dokunulursa paneli kapat
         this.townHall.setSelected(false);
       }
       return;
@@ -1319,7 +1548,13 @@ export class VillagerSystem {
       return;
     }
 
-    if (isRightClick && this.selectedVillagerIds.size > 0) {
+    if (isRightClick && activeSelectedCount > 0) {
+      // Seçili birimler varken Town Hall'a sağ tık: binaya yürüyüp içeri gir
+      if (hitTownHall) {
+        this.commandEnterSelectedIntoBuilding(this.townHall.id);
+        return;
+      }
+
       const hitTree = this.forestSystem.pickTreeAtWorld(
         worldPt.x,
         worldPt.y,
@@ -1373,7 +1608,7 @@ export class VillagerSystem {
     );
 
     for (const [id, unit] of this.villagers.entries()) {
-      if (unit.intersectsWorldRect(wMinX, wMinY, wMaxX, wMaxY)) {
+      if (!unit.isGarrisoned() && unit.intersectsWorldRect(wMinX, wMinY, wMaxX, wMaxY)) {
         nextSelection.add(id);
       }
     }
@@ -1428,7 +1663,7 @@ export class VillagerSystem {
       return;
     }
 
-    if (this.selectedVillagerIds.size > 0) {
+    if (this.getSelectedCount() > 0) {
       const hoveredTree = this.forestSystem.pickTreeAtWorld(
         worldPt.x,
         worldPt.y,
@@ -1456,7 +1691,7 @@ export class VillagerSystem {
     let bestY = Number.NEGATIVE_INFINITY;
 
     for (const unit of this.villagers.values()) {
-      if (!unit.containsWorldPoint(worldX, worldY, isTouch)) {
+      if (unit.isGarrisoned() || !unit.containsWorldPoint(worldX, worldY, isTouch)) {
         continue;
       }
 
@@ -1510,77 +1745,44 @@ export class VillagerSystem {
     result: WoodHarvestResult
   ): void {
     const vPos = villager.getWorldPosition();
-    const popText = this.scene.add
-      .text(vPos.x, vPos.y - 36, `+${result.harvested}`, {
-        fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-        fontSize: '11px',
-        fontStyle: 'bold',
-        color: '#fcd34d',
-        stroke: '#1e1b18',
-        strokeThickness: 2.5,
-      })
-      .setOrigin(0.5, 1)
-      .setDepth(vPos.y + 2200);
-
-    for (const cam of this.ignoredWorldCameras) {
-      cam.ignore(popText);
-    }
-
-    this.scene.tweens.add({
-      targets: popText,
-      y: vPos.y - 49,
-      alpha: 0,
-      duration: 500,
-      ease: 'Cubic.easeOut',
-      onComplete: () => {
-        popText.destroy();
-      },
-    });
+    this.spawnFloatingText(
+      vPos.x,
+      vPos.y - 36,
+      `+${result.harvested}`,
+      '#fcd34d',
+      500
+    );
   }
 
   private spawnWoodDepositPop(depositedAmount: number): void {
     const dPos = this.woodDepot.getWorldPosition();
-    const popText = this.scene.add
-      .text(dPos.x, dPos.y - 34, `+${depositedAmount} Depo`, {
-        fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-        fontSize: '12px',
-        fontStyle: 'bold',
-        color: '#4ade80',
-        stroke: '#14261a',
-        strokeThickness: 3,
-      })
-      .setOrigin(0.5, 1)
-      .setDepth(dPos.y + 2300);
-
-    for (const cam of this.ignoredWorldCameras) {
-      cam.ignore(popText);
-    }
-
-    this.scene.tweens.add({
-      targets: popText,
-      y: dPos.y - 52,
-      alpha: 0,
-      duration: 750,
-      ease: 'Cubic.easeOut',
-      onComplete: () => {
-        popText.destroy();
-      },
-    });
+    this.spawnFloatingText(
+      dPos.x,
+      dPos.y - 34,
+      `+${depositedAmount} Depo`,
+      '#4ade80',
+      750
+    );
   }
 
-  private spawnNewVillagerPop(villager: Villager): void {
-    const vPos = villager.getWorldPosition();
+  private spawnFloatingText(
+    worldX: number,
+    worldY: number,
+    message: string,
+    color: string,
+    duration = 800
+  ): void {
     const popText = this.scene.add
-      .text(vPos.x, vPos.y - 38, `+1 ${villager.displayName}`, {
+      .text(worldX, worldY, message, {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-        fontSize: '12px',
+        fontSize: '11.5px',
         fontStyle: 'bold',
-        color: '#86efac',
-        stroke: '#14261a',
-        strokeThickness: 3,
+        color,
+        stroke: '#141e18',
+        strokeThickness: 2.8,
       })
       .setOrigin(0.5, 1)
-      .setDepth(vPos.y + 2400);
+      .setDepth(worldY + 2400);
 
     for (const cam of this.ignoredWorldCameras) {
       cam.ignore(popText);
@@ -1588,9 +1790,9 @@ export class VillagerSystem {
 
     this.scene.tweens.add({
       targets: popText,
-      y: vPos.y - 56,
+      y: worldY - 16,
       alpha: 0,
-      duration: 850,
+      duration,
       ease: 'Cubic.easeOut',
       onComplete: () => {
         popText.destroy();

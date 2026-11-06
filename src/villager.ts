@@ -2,9 +2,9 @@
  * Karahanlı RTS — Köylü Birim Sınıfı (Villager)
  *
  * Tarihî Karahanlı dönemine uygun erkek köylü biriminin konum, hareket hızı,
- * tekli/çoklu seçim durumu, yönlü yürüyüş animasyonu, balta sallayarak odun toplama
- * (20 kapasite), dolunca ortak odun deposuna yürüme, odunu teslim edip tekrar ağaca
- * dönme döngüsünü, dinamik birim ayrışmasını ve izometrik derinlik sıralamasını yönetir.
+ * can/saldırı/savunma/tokluk verilerini, tekli/çoklu seçim durumunu, odun toplama
+ * ve ortak depoya teslim döngüsünü, ayrıca garnizon destekli binalara (Town Hall vb.)
+ * girip çıkma davranışını yönetir.
  */
 
 import Phaser from 'phaser';
@@ -15,6 +15,12 @@ import {
 } from './forestSystem';
 import { IsoGrid } from './isoGrid';
 import { GridCoord } from './pathfinding';
+import {
+  CarriedResourceSummary,
+  GarrisonableUnit,
+  UnitCategory,
+  UnitNutritionState,
+} from './unitTypes';
 import { WoodDepot } from './woodDepot';
 
 export const VILLAGER_TEXTURE_KEY = 'villager_karahanli';
@@ -25,7 +31,13 @@ export const VILLAGER_FRAME_HEIGHT = 152;
 /** Köylünün tek seferde taşıyabileceği maksimum odun kapasitesi */
 export const DEFAULT_WOOD_CAPACITY = 20;
 
-/** Bir balta darbesiyle 1 odun toplama süresi (ms) — 4 kare / 5 FPS = 800ms ile tam senkron */
+/** Köylü temel istatistikleri */
+export const VILLAGER_DEFAULT_MAX_HP = 60;
+export const VILLAGER_DEFAULT_ATTACK = 3;
+export const VILLAGER_DEFAULT_DEFENSE = 0;
+export const VILLAGER_DEFAULT_MAX_SATIETY = 100;
+
+/** Bir balta darbesiyle 1 odun toplama süresi (ms) */
 const CHOP_INTERVAL_MS = 800;
 
 const ANIM_WALK_FRONT = 'karahanli_villager_walk_front';
@@ -34,13 +46,9 @@ const ANIM_CHOP_FRONT = 'karahanli_villager_chop_front';
 const ANIM_CHOP_BACK = 'karahanli_villager_chop_back';
 
 const ORIGIN_X = 80 / VILLAGER_FRAME_WIDTH;
-/** Her iki çizme tabanının çimen yüzeyine tam bastığı dikey referans noktası */
 const ORIGIN_Y = 132 / VILLAGER_FRAME_HEIGHT;
 
-/** Ağaçlarla gerçekçi orantıda köylü görsel ölçeği (~34 dünya px boy) */
 const DEFAULT_SCALE = 0.37;
-
-/** Adım açıklığıyla kayma olmadan örtüşen doğal yürüyüş hızı (karo/sn) */
 const DEFAULT_MOVE_SPEED = 1.95;
 
 const BASE_WALK_FPS = 8.5;
@@ -50,7 +58,9 @@ export type VillagerState =
   | 'idle'
   | 'walking'
   | 'chopping'
-  | 'returning_to_depot';
+  | 'returning_to_depot'
+  | 'entering_building'
+  | 'garrisoned';
 
 export interface VillagerConfig {
   id: string;
@@ -60,6 +70,10 @@ export interface VillagerConfig {
   moveSpeed?: number;
   scale?: number;
   maxWoodCapacity?: number;
+  maxHp?: number;
+  initialHp?: number;
+  attackDamage?: number;
+  defenseArmor?: number;
   initialFacingBack?: boolean;
   initialFacingLeft?: boolean;
 }
@@ -80,18 +94,32 @@ export interface VillagerWorldContext {
   woodDepot: WoodDepot;
   planPathToTree: (villager: Villager, tree: TreeResourceNode) => GridCoord[];
   planPathToDepot: (villager: Villager) => GridCoord[];
+  canEnterBuildingNow: (villager: Villager, buildingId: string) => boolean;
+  completeEnterBuilding: (villager: Villager, buildingId: string) => boolean;
+  isFoodEconomyActive?: () => boolean;
   onWoodHarvested?: WoodHarvestCallback;
   onWoodDeposited?: WoodDepositCallback;
 }
 
-export class Villager {
+export class Villager implements GarrisonableUnit {
   public readonly id: string;
   public readonly displayName: string;
+  public readonly unitCategory: UnitCategory = 'villager';
+  public readonly unitTypeLabel = 'Karahanlı Köylüsü';
+
   private readonly isoGrid: IsoGrid;
   private readonly sprite: Phaser.GameObjects.Sprite;
   private readonly selectionRing: Phaser.GameObjects.Graphics;
   private readonly unitScale: number;
   private readonly maxWoodCapacity: number;
+
+  private readonly maxHp: number;
+  private hp: number;
+  private readonly attackDamage: number;
+  private readonly defenseArmor: number;
+  private readonly maxSatiety = VILLAGER_DEFAULT_MAX_SATIETY;
+  private satiety = VILLAGER_DEFAULT_MAX_SATIETY;
+  private foodEconomyActive = false;
 
   private gridPos: GridCoord;
   private worldPos: { x: number; y: number };
@@ -103,10 +131,18 @@ export class Villager {
   private facingBack: boolean;
   private facingLeft: boolean;
 
-  /** Her köylünün kendi bağımsız odun taşıma ve hedef ağaç durumu */
+  /** Kaynak taşıma ve ağaç hedef durumu */
   private carriedWood = 0;
   private assignedTreeId: string | null = null;
   private chopTimerMs = 0;
+
+  /** Garnizon ve komutan-grup bağlantısı durumu */
+  private pendingBuildingId: string | null = null;
+  private pendingBuildingName: string | null = null;
+  private garrisonBuildingId: string | null = null;
+  private garrisonBuildingName: string | null = null;
+  private commanderId: string | null = null;
+  private readonly attachedSubordinateIds = new Set<string>();
 
   /** Çoklu hareket sırasında hedef yakınında sıkışmayı önleyen varış sayacı */
   private nearGoalCrowdedMs = 0;
@@ -121,6 +157,14 @@ export class Villager {
     this.moveSpeed = config.moveSpeed ?? DEFAULT_MOVE_SPEED;
     this.unitScale = config.scale ?? DEFAULT_SCALE;
     this.maxWoodCapacity = config.maxWoodCapacity ?? DEFAULT_WOOD_CAPACITY;
+    this.maxHp = config.maxHp ?? VILLAGER_DEFAULT_MAX_HP;
+    this.hp = Phaser.Math.Clamp(
+      config.initialHp ?? this.maxHp,
+      1,
+      this.maxHp
+    );
+    this.attackDamage = config.attackDamage ?? VILLAGER_DEFAULT_ATTACK;
+    this.defenseArmor = config.defenseArmor ?? VILLAGER_DEFAULT_DEFENSE;
     this.facingBack = config.initialFacingBack ?? false;
     this.facingLeft = config.initialFacingLeft ?? false;
 
@@ -194,20 +238,203 @@ export class Villager {
     }
   }
 
+  // --- Can, Saldırı, Savunma ve Açlık Veri Modelleri ---
+
+  public getHp(): number {
+    return this.hp;
+  }
+
+  public getMaxHp(): number {
+    return this.maxHp;
+  }
+
+  public heal(amount: number): number {
+    if (amount <= 0 || this.hp >= this.maxHp) {
+      return 0;
+    }
+    const before = this.hp;
+    this.hp = Math.min(this.maxHp, this.hp + amount);
+    return this.hp - before;
+  }
+
+  public takeDamage(amount: number): number {
+    if (amount <= 0) {
+      return 0;
+    }
+    const reduced = Math.max(1, amount - this.defenseArmor);
+    const before = this.hp;
+    this.hp = Math.max(0, this.hp - reduced);
+    return before - this.hp;
+  }
+
+  public getAttackDamage(): number {
+    return this.attackDamage;
+  }
+
+  public getDefenseArmor(): number {
+    return this.defenseArmor;
+  }
+
+  public isCombatSystemActive(): boolean {
+    return false;
+  }
+
+  public getNutritionState(): UnitNutritionState {
+    return {
+      satiety: this.satiety,
+      maxSatiety: this.maxSatiety,
+      foodEconomyActive: this.foodEconomyActive,
+      statusText: this.foodEconomyActive
+        ? `Tok (%${Math.round((this.satiety / this.maxSatiety) * 100)})`
+        : `Doygun ${this.satiety}/${this.maxSatiety} (Erzak sistemi yakında)`,
+    };
+  }
+
+  public restoreSatiety(amount: number): number {
+    if (amount <= 0 || this.satiety >= this.maxSatiety) {
+      return 0;
+    }
+    const before = this.satiety;
+    this.satiety = Math.min(this.maxSatiety, this.satiety + amount);
+    return this.satiety - before;
+  }
+
+  public getCarriedResourceSummary(): CarriedResourceSummary {
+    return {
+      resourceType: this.carriedWood > 0 ? 'wood' : null,
+      resourceLabel: 'Odun',
+      amount: this.carriedWood,
+      maxCapacity: this.maxWoodCapacity,
+    };
+  }
+
+  public getTaskDescription(
+    resolveTreeLabel?: (treeId: string) => string | null
+  ): string {
+    if (this.state === 'garrisoned') {
+      return `Binada (${this.garrisonBuildingName ?? 'Town Hall'})`;
+    }
+    if (this.state === 'entering_building') {
+      return `Binaya Giriyor (${this.pendingBuildingName ?? 'Town Hall'})`;
+    }
+    if (this.state === 'chopping') {
+      const treeInfo =
+        this.assignedTreeId && resolveTreeLabel
+          ? resolveTreeLabel(this.assignedTreeId)
+          : null;
+      return treeInfo ? `Odun Topluyor (${treeInfo})` : 'Odun Topluyor';
+    }
+    if (this.state === 'returning_to_depot') {
+      return 'Depoya Odun Götürüyor';
+    }
+    if (this.state === 'walking') {
+      if (this.assignedTreeId) {
+        const treeInfo = resolveTreeLabel
+          ? resolveTreeLabel(this.assignedTreeId)
+          : null;
+        return treeInfo ? `Ağaca Yürüyor (${treeInfo})` : 'Ağaca Yürüyor';
+      }
+      return 'Yürüyor';
+    }
+    return 'Bekliyor';
+  }
+
+  // --- Komutan ve Bağlı Birlik (Retinue) Altyapısı ---
+
+  public getCommanderId(): string | null {
+    return this.commanderId;
+  }
+
+  public setCommanderId(commanderId: string | null): void {
+    this.commanderId = commanderId;
+  }
+
+  public getAttachedUnitIds(): readonly string[] {
+    return Array.from(this.attachedSubordinateIds);
+  }
+
+  public attachSubordinateUnit(unitId: string): void {
+    if (unitId !== this.id) {
+      this.attachedSubordinateIds.add(unitId);
+    }
+  }
+
+  public detachSubordinateUnit(unitId: string): void {
+    this.attachedSubordinateIds.delete(unitId);
+  }
+
+  // --- Garnizon Durum ve Yaşam Döngüsü ---
+
+  public isGarrisoned(): boolean {
+    return this.state === 'garrisoned' && this.garrisonBuildingId !== null;
+  }
+
+  public getGarrisonBuildingId(): string | null {
+    return this.garrisonBuildingId;
+  }
+
+  public onEnterGarrison(buildingId: string, buildingName: string): void {
+    this.garrisonBuildingId = buildingId;
+    this.garrisonBuildingName = buildingName;
+    this.pendingBuildingId = null;
+    this.pendingBuildingName = null;
+    this.assignedTreeId = null;
+    this.chopTimerMs = 0;
+    this.pathQueue = [];
+    this.targetGridPos = null;
+    this.nearGoalCrowdedMs = 0;
+    this.selected = false;
+    this.state = 'garrisoned';
+
+    this.sprite.anims.stop();
+    this.selectionRing.setVisible(false);
+    this.sprite.setVisible(false);
+  }
+
+  public onExitGarrison(exitSpot: GridCoord): void {
+    this.garrisonBuildingId = null;
+    this.garrisonBuildingName = null;
+    this.pendingBuildingId = null;
+    this.pendingBuildingName = null;
+    this.assignedTreeId = null;
+    this.chopTimerMs = 0;
+    this.pathQueue = [];
+    this.targetGridPos = null;
+    this.nearGoalCrowdedMs = 0;
+
+    this.gridPos.col = exitSpot.col;
+    this.gridPos.row = exitSpot.row;
+    this.facingBack = false;
+    this.facingLeft = true;
+
+    this.sprite.setVisible(true);
+    this.enterIdlePose();
+    this.syncVisualTransform();
+  }
+
+  // --- Seçim ve Hareket Kontrolleri ---
+
   public setSelected(value: boolean): void {
+    if (this.isGarrisoned() && value) {
+      return;
+    }
     if (this.selected === value) {
       return;
     }
     this.selected = value;
-    this.selectionRing.setVisible(value);
+    this.selectionRing.setVisible(value && !this.isGarrisoned());
   }
 
   public isSelected(): boolean {
-    return this.selected;
+    return this.selected && !this.isGarrisoned();
   }
 
   public isMoving(): boolean {
-    return this.state === 'walking' || this.state === 'returning_to_depot';
+    return (
+      this.state === 'walking' ||
+      this.state === 'returning_to_depot' ||
+      this.state === 'entering_building'
+    );
   }
 
   public getGridPosition(): GridCoord {
@@ -255,12 +482,13 @@ export class Villager {
     return this.state;
   }
 
-  /**
-   * Köylüye normal bir yürüyüş rotası atar.
-   * Bu köylünün aktif odun toplama veya depoya dönüş döngüsünü iptal eder.
-   */
   public setMovePath(waypoints: GridCoord[]): void {
+    if (this.isGarrisoned()) {
+      return;
+    }
     this.assignedTreeId = null;
+    this.pendingBuildingId = null;
+    this.pendingBuildingName = null;
     this.chopTimerMs = 0;
     this.nearGoalCrowdedMs = 0;
 
@@ -272,15 +500,17 @@ export class Villager {
     this.assignPathQueue(waypoints, 'walking');
   }
 
-  /**
-   * Köylüye belirtilen ağaca yürüyüp odun toplama (ve 20 doldukça ortak depoya taşıma) emri verir.
-   */
   public setHarvestTreeOrder(
     treeId: string,
     approachWaypoints: GridCoord[],
     context: VillagerWorldContext
   ): void {
+    if (this.isGarrisoned()) {
+      return;
+    }
     this.assignedTreeId = treeId;
+    this.pendingBuildingId = null;
+    this.pendingBuildingName = null;
     this.chopTimerMs = 0;
     this.nearGoalCrowdedMs = 0;
 
@@ -299,14 +529,16 @@ export class Villager {
     this.beginChoppingIfPossible(context);
   }
 
-  /**
-   * Köylüye elindeki mevcut odunu doğrudan ortak depoya götürüp bırakma emri verir.
-   */
   public setDeliverToDepotOrder(
     context: VillagerWorldContext,
     customWaypoints?: GridCoord[]
   ): void {
+    if (this.isGarrisoned()) {
+      return;
+    }
     this.assignedTreeId = null;
+    this.pendingBuildingId = null;
+    this.pendingBuildingName = null;
     this.chopTimerMs = 0;
     this.nearGoalCrowdedMs = 0;
 
@@ -323,17 +555,69 @@ export class Villager {
     this.startReturnToDepot(context, customWaypoints);
   }
 
+  /**
+   * Birime belirtilen garnizon binasına (ör. Town Hall) yürüyüp girişe ulaştığında
+   * içeri girme emri verir.
+   */
+  public setEnterBuildingOrder(
+    buildingId: string,
+    buildingName: string,
+    approachWaypoints: GridCoord[],
+    context: VillagerWorldContext
+  ): void {
+    if (this.isGarrisoned()) {
+      return;
+    }
+
+    this.assignedTreeId = null;
+    this.chopTimerMs = 0;
+    this.nearGoalCrowdedMs = 0;
+    this.pendingBuildingId = buildingId;
+    this.pendingBuildingName = buildingName;
+
+    if (context.canEnterBuildingNow(this, buildingId)) {
+      context.completeEnterBuilding(this, buildingId);
+      return;
+    }
+
+    if (approachWaypoints.length > 0) {
+      this.assignPathQueue(approachWaypoints, 'entering_building');
+      return;
+    }
+
+    if (!context.completeEnterBuilding(this, buildingId)) {
+      this.stopMovement();
+    }
+  }
+
   public stopMovement(): void {
+    if (this.isGarrisoned()) {
+      return;
+    }
     this.pathQueue = [];
     this.targetGridPos = null;
     this.assignedTreeId = null;
+    this.pendingBuildingId = null;
+    this.pendingBuildingName = null;
     this.chopTimerMs = 0;
     this.nearGoalCrowdedMs = 0;
     this.enterIdlePose();
   }
 
   public update(deltaMs: number, context: VillagerWorldContext): void {
-    if (this.state === 'walking' || this.state === 'returning_to_depot') {
+    this.foodEconomyActive = context.isFoodEconomyActive?.() ?? false;
+
+    if (this.isGarrisoned()) {
+      // Bina içindeki birim kaynak toplamaz ve haritada hareket etmez
+      this.wasSeparatedLastStep = false;
+      return;
+    }
+
+    if (
+      this.state === 'walking' ||
+      this.state === 'returning_to_depot' ||
+      this.state === 'entering_building'
+    ) {
       this.updatePathMovement(deltaMs, context);
       this.wasSeparatedLastStep = false;
       return;
@@ -345,15 +629,14 @@ export class Villager {
     }
   }
 
-  /**
-   * Çoklu köylü hareketinde birbirlerinin üstüne binmemeleri için dinamik
-   * ayrışma itmesini engellere çarpmadan uygular.
-   */
   public applySeparationOffset(
     dCol: number,
     dRow: number,
     isWalkablePos: (col: number, row: number) => boolean
   ): boolean {
+    if (this.isGarrisoned()) {
+      return false;
+    }
     if (Math.abs(dCol) < 0.0001 && Math.abs(dRow) < 0.0001) {
       return false;
     }
@@ -391,6 +674,10 @@ export class Villager {
     worldY: number,
     isTouch = false
   ): boolean {
+    if (this.isGarrisoned()) {
+      return false;
+    }
+
     const visualHalfW = Math.round(18 * this.unitScale);
     const visualHeight = Math.round(92 * this.unitScale);
 
@@ -406,16 +693,16 @@ export class Villager {
     );
   }
 
-  /**
-   * Fare veya dokunmatik seçim dikdörtgeninin (dünya uzayı karşılığı) bu köylünün
-   * görsel gövdesini kesip kesmediğini döndürür.
-   */
   public intersectsWorldRect(
     minX: number,
     minY: number,
     maxX: number,
     maxY: number
   ): boolean {
+    if (this.isGarrisoned()) {
+      return false;
+    }
+
     const halfW = 16 * this.unitScale;
     const bodyHeight = 88 * this.unitScale;
 
@@ -432,9 +719,6 @@ export class Villager {
     );
   }
 
-  /**
-   * Tıklanan/dokunulan noktanın bu köylünün görsel gövde merkezine olan uzaklığını döndürür.
-   */
   public distanceToBodyCenter(worldX: number, worldY: number): number {
     const bodyCenterY = this.worldPos.y - 46 * this.unitScale;
     return Math.hypot(worldX - this.worldPos.x, worldY - bodyCenterY);
@@ -462,7 +746,7 @@ export class Villager {
 
   private assignPathQueue(
     waypoints: GridCoord[],
-    moveState: 'walking' | 'returning_to_depot'
+    moveState: 'walking' | 'returning_to_depot' | 'entering_building'
   ): void {
     this.pathQueue = waypoints.map((pt) => ({ col: pt.col, row: pt.row }));
     this.targetGridPos = {
@@ -525,7 +809,18 @@ export class Villager {
         }
       }
 
-      // Son ara noktaya çok yakınken komşu köylü ayrışması itiyorsa sonsuz yürüyüşü önle
+      // Binaya girme emriyle yürürken son basamaklara ulaştıysa doğrudan içeri al
+      if (
+        arrivingState === 'entering_building' &&
+        this.pendingBuildingId &&
+        this.pathQueue.length <= 1 &&
+        context.canEnterBuildingNow(this, this.pendingBuildingId)
+      ) {
+        this.syncVisualTransform();
+        context.completeEnterBuilding(this, this.pendingBuildingId);
+        return;
+      }
+
       if (this.pathQueue.length === 1) {
         const finalPt = this.pathQueue[0];
         const distToFinal = Math.hypot(
@@ -549,7 +844,12 @@ export class Villager {
       this.targetGridPos = null;
       this.nearGoalCrowdedMs = 0;
 
-      if (arrivingState === 'returning_to_depot') {
+      if (arrivingState === 'entering_building' && this.pendingBuildingId) {
+        const bid = this.pendingBuildingId;
+        if (!context.completeEnterBuilding(this, bid)) {
+          this.stopMovement();
+        }
+      } else if (arrivingState === 'returning_to_depot') {
         this.completeDepotDeliveryAndResume(context);
       } else if (this.assignedTreeId) {
         this.beginChoppingIfPossible(context);
