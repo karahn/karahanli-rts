@@ -3,8 +3,9 @@
  *
  * Phaser 3 + TypeScript + Vite tabanlı 2D gerçek zamanlı strateji oyunu.
  * 16x16 dikişsiz izometrik çimen haritayı, doğal koruluk yerleşimindeki
- * 2 kayın + 2 çam odun kaynağını (her biri 100 odun), sabit ahşap odun deposunu,
- * ilk Karahanlı köylüsünü ve otomatik odun toplama-teslim döngüsünü çalıştırır.
+ * 2 kayın + 2 çam odun kaynağını (her biri 100 odun), ortak ahşap odun deposunu
+ * ve birbirinden bağımsız hareket edip odun toplayabilen çoklu Karahanlı
+ * köylülerini (başlangıçta 3 köylü) sahnede çalıştırır.
  */
 
 import Phaser from 'phaser';
@@ -17,7 +18,7 @@ import { WoodDepot } from './woodDepot';
 /** Arayüz (UI) öğeleri için en üst derinlik katmanı */
 const UI_DEPTH = 5000;
 
-/** Üst başlık ve odun göstergesi için ayrılan ekran yüksekliği (px) */
+/** Üst başlık ve ortak odun sayacı için ayrılan ekran yüksekliği (px) */
 const TOP_HUD_INSET = 104;
 
 class MainScene extends Phaser.Scene {
@@ -33,7 +34,7 @@ class MainScene extends Phaser.Scene {
   private woodPanelBg?: Phaser.GameObjects.Graphics;
   private woodStatusText?: Phaser.GameObjects.Text;
   private lastWoodHudLine = '';
-  private lastDelivering = false;
+  private lastHighlightActive = false;
 
   constructor() {
     super({ key: 'MainScene' });
@@ -60,7 +61,7 @@ class MainScene extends Phaser.Scene {
     this.forestSystem = new ForestSystem(this, this.isoGrid);
     this.forestSystem.populate();
 
-    // Koruluğa yakın sabit odun deposu (col: 7, row: 6)
+    // Tüm köylülerin ortak kullandığı sabit odun deposu (col: 7, row: 6)
     this.woodDepot = new WoodDepot(this, this.isoGrid);
 
     // 16x16 harita için ekran ölçekleme, sürükleme ve yakınlaştırma kontrolcüsü
@@ -71,7 +72,7 @@ class MainScene extends Phaser.Scene {
       topUiInset: TOP_HUD_INSET,
     });
 
-    // İlk Karahanlı köylüsü, seçim halkası, yürüyüş ve odun toplama/teslim sistemi
+    // Çoklu Karahanlı köylü sistemi (başlangıçta 3 bağımsız köylü)
     this.villagerSystem = new VillagerSystem(
       this,
       this.isoGrid,
@@ -79,9 +80,9 @@ class MainScene extends Phaser.Scene {
       this.woodDepot,
       this.cameraController
     );
-    this.villagerSystem.spawnInitialVillager();
+    this.villagerSystem.spawnInitialVillagers();
 
-    // Sabit üst başlık, kontrol açıklaması ve toplam/taşınan odun sayacı
+    // Sabit üst başlık, kontrol açıklaması ve ortak odun sayacı
     this.titleText = this.add
       .text(0, 0, 'KARAHANLI RTS', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
@@ -96,7 +97,7 @@ class MainScene extends Phaser.Scene {
       .text(
         0,
         0,
-        'Sol Tık / Dokun: Seç  •  Ağaca Sağ Tık / Dokun: Odun Topla  •  Zemine Sağ Tık / Dokun: Yürüt',
+        'Sol Tık / Dokun: Köylü Seç  •  Ağaca Sağ Tık / Dokun: Odun Topla  •  Zemine Sağ Tık / Dokun: Yürüt',
         {
           fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
           fontSize: '12px',
@@ -154,36 +155,49 @@ class MainScene extends Phaser.Scene {
     }
 
     const status = this.villagerSystem.getHudStatus();
-    if (!status) {
-      return;
+    const sel = status.selectedVillager;
+
+    let line: string;
+    let highlight = false;
+
+    if (sel) {
+      highlight = true;
+      const stateLabel =
+        sel.state === 'chopping'
+          ? 'Kesiyor'
+          : sel.state === 'returning_to_depot'
+            ? 'Depoya Götürüyor'
+            : sel.state === 'walking'
+              ? 'Yürüyor'
+              : 'Hazır';
+
+      let detailPart = stateLabel;
+      if (
+        sel.targetTreeType !== null &&
+        sel.targetTreeWood !== null &&
+        sel.targetTreeMaxWood !== null
+      ) {
+        const treeName = sel.targetTreeType === 'cam' ? 'Çam' : 'Kayın';
+        detailPart = `${stateLabel} (${treeName}: ${sel.targetTreeWood}/${sel.targetTreeMaxWood})`;
+      }
+
+      line = `Toplam Odun: ${status.totalStoredWood}   •   ${sel.displayName}: ${sel.carriedWood}/${sel.maxCapacity}   •   ${detailPart}`;
+    } else {
+      line = `Toplam Odun: ${status.totalStoredWood}   •   Köylüler: ${status.totalVillagersCount} (${status.workingVillagersCount} Aktif)   •   Orman: ${status.remainingTreesCount} Ağaç`;
     }
 
-    const isDelivering = status.state === 'returning_to_depot';
-    const carryTag = isDelivering ? ' (Depoya)' : '';
-    let detailPart = `Orman: ${status.remainingTreesCount} Ağaç`;
-
-    if (
-      status.targetTreeType !== null &&
-      status.targetTreeWood !== null &&
-      status.targetTreeMaxWood !== null
-    ) {
-      const treeName = status.targetTreeType === 'cam' ? 'Çam' : 'Kayın';
-      detailPart = `${treeName}: ${status.targetTreeWood} / ${status.targetTreeMaxWood}`;
-    }
-
-    const line = `Toplam Odun: ${status.totalStoredWood}   •   Taşınan: ${status.carriedWood} / ${status.maxCapacity}${carryTag}   •   ${detailPart}`;
     if (
       !force &&
       line === this.lastWoodHudLine &&
-      isDelivering === this.lastDelivering
+      highlight === this.lastHighlightActive
     ) {
       return;
     }
 
     this.lastWoodHudLine = line;
-    this.lastDelivering = isDelivering;
+    this.lastHighlightActive = highlight;
     this.woodStatusText.setText(line);
-    this.woodStatusText.setColor(isDelivering ? '#fde68a' : '#f1f5f9');
+    this.woodStatusText.setColor(highlight ? '#f8fafc' : '#e2e8f0');
     this.drawWoodPillBackground(this.scale.width);
   }
 
@@ -219,7 +233,7 @@ class MainScene extends Phaser.Scene {
     this.woodPanelBg.fillRoundedRect(x, y, pillW, pillH, 12);
     this.woodPanelBg.lineStyle(
       1,
-      this.lastDelivering ? 0xf59e0b : 0x475569,
+      this.lastHighlightActive ? 0x4ade80 : 0x475569,
       0.9
     );
     this.woodPanelBg.strokeRoundedRect(x, y, pillW, pillH, 12);

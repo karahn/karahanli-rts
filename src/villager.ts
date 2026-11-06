@@ -3,8 +3,8 @@
  *
  * Tarihî Karahanlı dönemine uygun erkek köylü biriminin konum, hareket hızı,
  * seçim durumu, yönlü yürüyüş animasyonu, balta sallayarak odun toplama (20 kapasite),
- * dolunca odun deposuna yürüme, odunu teslim edip tekrar ağaca dönme döngüsünü
- * ve izometrik derinlik sıralamasını yönetir.
+ * dolunca ortak odun deposuna yürüme, odunu teslim edip tekrar ağaca dönme döngüsünü
+ * ve izometrik derinlik sıralamasını bağımsız olarak yönetir.
  */
 
 import Phaser from 'phaser';
@@ -54,11 +54,14 @@ export type VillagerState =
 
 export interface VillagerConfig {
   id: string;
+  displayName?: string;
   col: number;
   row: number;
   moveSpeed?: number;
   scale?: number;
   maxWoodCapacity?: number;
+  initialFacingBack?: boolean;
+  initialFacingLeft?: boolean;
 }
 
 export type WoodHarvestCallback = (
@@ -75,14 +78,15 @@ export type WoodDepositCallback = (
 export interface VillagerWorldContext {
   forestSystem: ForestSystem;
   woodDepot: WoodDepot;
-  planPathToTree: (from: GridCoord, tree: TreeResourceNode) => GridCoord[];
-  planPathToDepot: (from: GridCoord) => GridCoord[];
+  planPathToTree: (villager: Villager, tree: TreeResourceNode) => GridCoord[];
+  planPathToDepot: (villager: Villager) => GridCoord[];
   onWoodHarvested?: WoodHarvestCallback;
   onWoodDeposited?: WoodDepositCallback;
 }
 
 export class Villager {
   public readonly id: string;
+  public readonly displayName: string;
   private readonly isoGrid: IsoGrid;
   private readonly sprite: Phaser.GameObjects.Sprite;
   private readonly selectionRing: Phaser.GameObjects.Graphics;
@@ -96,22 +100,25 @@ export class Villager {
   private state: VillagerState = 'idle';
   private targetGridPos: GridCoord | null = null;
   private pathQueue: GridCoord[] = [];
-  private facingBack = false;
-  private facingLeft = false;
+  private facingBack: boolean;
+  private facingLeft: boolean;
 
-  /** Odun toplama, taşıma ve depo teslim döngüsü durumu */
+  /** Her köylünün kendi bağımsız odun taşıma ve hedef ağaç durumu */
   private carriedWood = 0;
   private assignedTreeId: string | null = null;
   private chopTimerMs = 0;
 
   constructor(scene: Phaser.Scene, isoGrid: IsoGrid, config: VillagerConfig) {
     this.id = config.id;
+    this.displayName = config.displayName ?? config.id;
     this.isoGrid = isoGrid;
     this.gridPos = { col: config.col, row: config.row };
     this.worldPos = isoGrid.tileToWorld(config.col, config.row);
     this.moveSpeed = config.moveSpeed ?? DEFAULT_MOVE_SPEED;
     this.unitScale = config.scale ?? DEFAULT_SCALE;
     this.maxWoodCapacity = config.maxWoodCapacity ?? DEFAULT_WOOD_CAPACITY;
+    this.facingBack = config.initialFacingBack ?? false;
+    this.facingLeft = config.initialFacingLeft ?? false;
 
     this.selectionRing = scene.add.graphics();
     this.drawSelectionRing();
@@ -121,10 +128,11 @@ export class Villager {
       this.worldPos.x,
       this.worldPos.y,
       VILLAGER_TEXTURE_KEY,
-      0
+      this.facingBack ? 4 : 0
     );
     this.sprite.setOrigin(ORIGIN_X, ORIGIN_Y);
     this.sprite.setScale(this.unitScale);
+    this.sprite.setFlipX(this.facingLeft);
 
     this.syncVisualTransform();
   }
@@ -241,7 +249,7 @@ export class Villager {
 
   /**
    * Köylüye normal bir yürüyüş rotası atar.
-   * Devam eden odun toplama veya depoya dönüş döngüsü anında iptal edilir.
+   * Sadece bu köylünün aktif odun toplama veya depoya dönüş döngüsü iptal edilir.
    */
   public setMovePath(waypoints: GridCoord[]): void {
     this.assignedTreeId = null;
@@ -256,8 +264,7 @@ export class Villager {
   }
 
   /**
-   * Köylüye belirtilen ağaca yürüyüp odun toplama (ve 20 doldukça depoya taşıma) emri verir.
-   * Eğer köylünün kucağı zaten 20/20 doluysa önce depoya boşaltır, ardından bu ağaca döner.
+   * Köylüye belirtilen ağaca yürüyüp odun toplama (ve 20 doldukça ortak depoya taşıma) emri verir.
    */
   public setHarvestTreeOrder(
     treeId: string,
@@ -283,14 +290,14 @@ export class Villager {
   }
 
   /**
-   * Köylüye elindeki mevcut odunu doğrudan depoya götürüp bırakma emri verir.
+   * Köylüye elindeki mevcut odunu doğrudan ortak depoya götürüp bırakma emri verir.
    */
   public setDeliverToDepotOrder(context: VillagerWorldContext): void {
     this.assignedTreeId = null;
     this.chopTimerMs = 0;
 
     if (this.carriedWood <= 0) {
-      const depotWaypoints = context.planPathToDepot(this.gridPos);
+      const depotWaypoints = context.planPathToDepot(this);
       if (depotWaypoints.length > 0) {
         this.assignPathQueue(depotWaypoints, 'walking');
       } else {
@@ -302,7 +309,6 @@ export class Villager {
     this.startReturnToDepot(context);
   }
 
-  /** Mevcut yürüyüş veya odun toplama görevini tamamen durdurup idle duruşuna geçer. */
   public stopMovement(): void {
     this.pathQueue = [];
     this.targetGridPos = null;
@@ -311,9 +317,6 @@ export class Villager {
     this.enterIdlePose();
   }
 
-  /**
-   * Her karede köylünün yürüyüş, odun kesme ve depoya teslim döngüsünü çalıştırır.
-   */
   public update(deltaMs: number, context: VillagerWorldContext): void {
     if (this.state === 'walking' || this.state === 'returning_to_depot') {
       this.updatePathMovement(deltaMs, context);
@@ -343,6 +346,15 @@ export class Villager {
       worldY >= this.worldPos.y - (visualHeight + padTop) &&
       worldY <= this.worldPos.y + padBottom
     );
+  }
+
+  /**
+   * Tıklanan/dokunulan noktanın bu köylünün görsel gövde merkezine olan uzaklığını döndürür.
+   * Yakın duran birden fazla köylü arasında en doğru seçimi yapmak için kullanılır.
+   */
+  public distanceToBodyCenter(worldX: number, worldY: number): number {
+    const bodyCenterY = this.worldPos.y - 46 * this.unitScale;
+    return Math.hypot(worldX - this.worldPos.x, worldY - bodyCenterY);
   }
 
   public ignoreOnCamera(camera: Phaser.Cameras.Scene2D.Camera): void {
@@ -525,7 +537,6 @@ export class Villager {
         context.onWoodHarvested?.(this, result);
       }
 
-      // 20 odun kapasitesi dolduğunda depoya yürü (ağaç kimliğini koruyarak!)
       if (this.isCarryFull()) {
         if (result.depleted) {
           this.assignedTreeId = null;
@@ -534,7 +545,6 @@ export class Villager {
         return;
       }
 
-      // Ağaç tamamen tükendiyse eldeki odunu depoya götür veya dur
       if (result.depleted) {
         this.assignedTreeId = null;
         if (this.carriedWood > 0) {
@@ -547,9 +557,6 @@ export class Villager {
     }
   }
 
-  /**
-   * Köylüyü elindeki odunları teslim etmek üzere odun deposuna yönlendirir.
-   */
   private startReturnToDepot(context: VillagerWorldContext): void {
     this.chopTimerMs = 0;
     const depotTile = context.woodDepot.getTile();
@@ -565,7 +572,7 @@ export class Villager {
       return;
     }
 
-    const waypoints = context.planPathToDepot(this.gridPos);
+    const waypoints = context.planPathToDepot(this);
     if (waypoints.length > 0) {
       this.assignPathQueue(waypoints, 'returning_to_depot');
     } else {
@@ -573,10 +580,6 @@ export class Villager {
     }
   }
 
-  /**
-   * Depoya varıldığında taşınan odunu sıfırlayıp depoya aktarır;
-   * atanan ağaç hâlâ duruyorsa otomatik olarak ağaca geri yürüyüp kesime devam eder.
-   */
   private completeDepotDeliveryAndResume(context: VillagerWorldContext): void {
     const depotWorld = context.woodDepot.getWorldPosition();
     this.orientTowardWorldPoint(depotWorld.x, depotWorld.y);
@@ -591,7 +594,7 @@ export class Villager {
     if (this.assignedTreeId) {
       const tree = context.forestSystem.getTree(this.assignedTreeId);
       if (tree && tree.woodAmount > 0) {
-        const backToTree = context.planPathToTree(this.gridPos, tree);
+        const backToTree = context.planPathToTree(this, tree);
         if (backToTree.length > 0) {
           this.assignPathQueue(backToTree, 'walking');
           return;
