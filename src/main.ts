@@ -7,14 +7,23 @@
 import Phaser from 'phaser';
 import { IsoGrid } from './isoGrid';
 
-const TEST_TREE_TILE = { col: 3, row: 3 } as const;
-// 105×108 sprite içinde gövde kök tabanının yere bastığı piksel (45, 93)
-const TREE_ORIGIN_X = 45 / 105;
-const TREE_ORIGIN_Y = 93 / 108;
+const STEPPE_TREE_TILE = { col: 3, row: 3 } as const;
+
+// 2x HD (239×216) bozkır ağacı sprite'ı kök taban merkezi: (119, 187)
+const STEPPE_TREE_ORIGIN_X = 119 / 239;
+const STEPPE_TREE_ORIGIN_Y = 187 / 216;
+
+// 2x HD (340×180) izometrik izdüşüm gölge sprite'ı kök referans noktası: (104, 88)
+const STEPPE_SHADOW_ORIGIN_X = 104 / 340;
+const STEPPE_SHADOW_ORIGIN_Y = 88 / 180;
+
+const STEPPE_SPRITE_SCALE = 0.5;
+const GROUND_SHADOW_DEPTH = 5;
 
 class MainScene extends Phaser.Scene {
   private isoGrid?: IsoGrid;
-  private testTree?: Phaser.GameObjects.Image;
+  private steppeTreeShadow?: Phaser.GameObjects.Image;
+  private steppeTree?: Phaser.GameObjects.Image;
   private titleText?: Phaser.GameObjects.Text;
   private subtitleText?: Phaser.GameObjects.Text;
 
@@ -23,7 +32,11 @@ class MainScene extends Phaser.Scene {
   }
 
   preload(): void {
-    this.load.image('tree-karagach', 'assets/sprites/tree_karagach.png');
+    this.load.image('steppe-tree', 'assets/sprites/steppe_tree.png');
+    this.load.image(
+      'steppe-tree-shadow',
+      'assets/sprites/steppe_tree_shadow.png'
+    );
   }
 
   create(): void {
@@ -37,16 +50,25 @@ class MainScene extends Phaser.Scene {
     });
     this.isoGrid.setPosition(width / 2, height / 2 + 20);
 
-    // 8×8 harita üzerinde tek adet Orta Asya karaağaç (Karagach) test ağacı
     const treePos = this.isoGrid.tileToWorld(
-      TEST_TREE_TILE.col,
-      TEST_TREE_TILE.row
+      STEPPE_TREE_TILE.col,
+      STEPPE_TREE_TILE.row
     );
-    this.testTree = this.add
-      .image(treePos.x, treePos.y, 'tree-karagach')
-      .setOrigin(TREE_ORIGIN_X, TREE_ORIGIN_Y)
+
+    // 1) Zemin gölge katmanı (çimen dokusunu kapatmadan doğal yaprak/gövde gölgesi düşürür)
+    this.steppeTreeShadow = this.add
+      .image(treePos.x, treePos.y, 'steppe-tree-shadow')
+      .setOrigin(STEPPE_SHADOW_ORIGIN_X, STEPPE_SHADOW_ORIGIN_Y)
+      .setScale(STEPPE_SPRITE_SCALE)
+      .setDepth(GROUND_SHADOW_DEPTH);
+
+    // 2) Orta Asya bozkır ağacı (izometrik Y-derinlik sıralaması ile karo merkezine oturur)
+    this.steppeTree = this.add
+      .image(treePos.x, treePos.y, 'steppe-tree')
+      .setOrigin(STEPPE_TREE_ORIGIN_X, STEPPE_TREE_ORIGIN_Y)
+      .setScale(STEPPE_SPRITE_SCALE)
       .setDepth(
-        this.isoGrid.getTileDepth(TEST_TREE_TILE.col, TEST_TREE_TILE.row)
+        this.isoGrid.getTileDepth(STEPPE_TREE_TILE.col, STEPPE_TREE_TILE.row)
       );
 
     this.titleText = this.add
@@ -75,12 +97,13 @@ class MainScene extends Phaser.Scene {
     const { width, height } = gameSize;
     this.isoGrid?.setPosition(width / 2, height / 2 + 20);
 
-    if (this.isoGrid && this.testTree) {
+    if (this.isoGrid) {
       const treePos = this.isoGrid.tileToWorld(
-        TEST_TREE_TILE.col,
-        TEST_TREE_TILE.row
+        STEPPE_TREE_TILE.col,
+        STEPPE_TREE_TILE.row
       );
-      this.testTree.setPosition(treePos.x, treePos.y);
+      this.steppeTreeShadow?.setPosition(treePos.x, treePos.y);
+      this.steppeTree?.setPosition(treePos.x, treePos.y);
     }
 
     this.titleText?.setPosition(width / 2, 42);
