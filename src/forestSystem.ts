@@ -2,9 +2,9 @@
  * Karahanlı RTS — Küçük Orman ve Odun Kaynağı Altyapısı (ForestSystem)
  *
  * 16x16 harita üzerindeki kayın ve çam ağaçlarını odun kaynağı düğümleri
- * (TreeResourceNode) olarak yönetir. Her ağaç benzersiz kimlik, tür, ızgara
- * koordinatı ve odun miktarı (100) bilgisiyle tutulur; ileride köylülerin
- * odun toplaması ve tükenen ağaçların haritadan kaldırılması için hazırdır.
+ * (TreeResourceNode) olarak yönetir. Köylülerin ağaçlara tıklayarak odun
+ * toplaması, her darbede ağacın 100 odunluk kaynağının azalması ve odunu
+ * sıfırlanan ağacın haritadan kaldırılması işlemlerini yürütür.
  */
 
 import Phaser from 'phaser';
@@ -64,9 +64,18 @@ export interface TreeResourceNode {
   readonly sprite: Phaser.GameObjects.Image;
 }
 
+/** Bir balta vuruşu sonucunda ağaçtan alınan odun özeti */
+export interface WoodHarvestResult {
+  harvested: number;
+  remaining: number;
+  depleted: boolean;
+  treeType?: TreeType;
+  worldPos?: { x: number; y: number };
+}
+
 /**
  * 16x16 haritanın kuzeybatı iç çayırında doğal bir koruluk (pocket woodland) yerleşimi:
- * - 2 kayın + 2 çam ağacı üst kenara duvar gibi dizilmeden organik üçgen/elmas küme oluşturur
+ * - 2 kayın + 2 çam ağacı üst kenara duvar gibi dizilmeden organik küme oluşturur
  * - Ağaçların arasında köylülerin rahatça yürüyebileceği 1-2 karoluk doğal açıklıklar bulunur
  * - Haritanın geniş orta, doğu ve güney düzlükleri (col 6..15, row 3..15) tamamen açıktır
  */
@@ -83,6 +92,7 @@ export class ForestSystem {
   private readonly nodesById = new Map<string, TreeResourceNode>();
   private readonly nodesByTile = new Map<string, TreeResourceNode>();
   private readonly ignoredCameras = new Set<Phaser.Cameras.Scene2D.Camera>();
+  private readonly hitTweens = new Map<string, Phaser.Tweens.Tween>();
 
   constructor(scene: Phaser.Scene, isoGrid: IsoGrid) {
     this.scene = scene;
@@ -149,6 +159,102 @@ export class ForestSystem {
   }
 
   /**
+   * Ağaçtan belirtilen miktarda odun eksiltir; odun 0'a düştüğünde ağacı
+   * haritadan ve veri yapısından otomatik olarak kaldırır.
+   */
+  public harvestWood(id: string, requestedAmount: number): WoodHarvestResult {
+    const node = this.nodesById.get(id);
+    if (!node || requestedAmount <= 0) {
+      return {
+        harvested: 0,
+        remaining: node?.woodAmount ?? 0,
+        depleted: !node || node.woodAmount <= 0,
+      };
+    }
+
+    const worldPos = this.isoGrid.tileToWorld(node.tile.col, node.tile.row);
+    const treeType = node.treeType;
+    const harvested = Math.min(node.woodAmount, requestedAmount);
+    node.woodAmount -= harvested;
+
+    if (node.woodAmount <= 0) {
+      node.woodAmount = 0;
+      this.removeTree(node.id);
+      return {
+        harvested,
+        remaining: 0,
+        depleted: true,
+        treeType,
+        worldPos,
+      };
+    }
+
+    this.playTrunkImpactShake(node, worldPos.x);
+    return {
+      harvested,
+      remaining: node.woodAmount,
+      depleted: false,
+      treeType,
+      worldPos,
+    };
+  }
+
+  /**
+   * Dünya koordinatındaki (worldX, worldY) bir sağ tık veya dokunmanın hangi
+   * ağacın köküne, gövdesine ya da taç yapraklarına isabet ettiğini bulur.
+   * Öndeki ağaçlar (yüksek depth) arkadakilere göre önceliklidir.
+   */
+  public pickTreeAtWorld(
+    worldX: number,
+    worldY: number,
+    isTouch = false
+  ): TreeResourceNode | undefined {
+    const pad = isTouch ? 9 : 3;
+    const candidates = Array.from(this.nodesById.values()).sort(
+      (a, b) => b.sprite.depth - a.sprite.depth
+    );
+
+    for (const node of candidates) {
+      const base = this.isoGrid.tileToWorld(node.tile.col, node.tile.row);
+      const dx = worldX - base.x;
+      const dy = worldY - base.y;
+
+      if (node.treeType === 'cam') {
+        // Çam: kök tabanından konik tepeye uzanan gövde + ibreli dallar alanı
+        const topH = 198 * node.scale + pad;
+        const botH = 10 + pad;
+        if (dy <= botH && dy >= -topH) {
+          const heightRatio = Phaser.Math.Clamp(-dy / Math.max(1, topH), 0, 1);
+          const halfW = (52 * (1 - heightRatio * 0.65) + 12) * node.scale + pad;
+          if (Math.abs(dx) <= halfW) {
+            return node;
+          }
+        }
+      } else {
+        // Kayın: kök/gövde dikdörtgeni + geniş eliptik yaprak tacı
+        const trunkHalfW = 28 * node.scale + pad;
+        const inTrunk =
+          Math.abs(dx) <= trunkHalfW && dy <= 10 + pad && dy >= -68 * node.scale;
+
+        const crownCenterY = -98 * node.scale;
+        const crownRx = 96 * node.scale + pad;
+        const crownRy = 72 * node.scale + pad;
+        const normX = dx / crownRx;
+        const normY = (dy - crownCenterY) / crownRy;
+        const inCrown = normX * normX + normY * normY <= 1;
+
+        if (inTrunk || inCrown) {
+          return node;
+        }
+      }
+    }
+
+    // Son kontrol: doğrudan ağacın bulunduğu ızgara karosuna tıklandıysa
+    const rawTile = this.isoGrid.worldToTile(worldX, worldY);
+    return this.getTreeAt(Math.round(rawTile.col), Math.round(rawTile.row));
+  }
+
+  /**
    * Belirtilen kameranın (ör. sabit arayüz/HUD kamerası) ağaç sprite'larını
    * çizmemesini sağlar; sonradan eklenecek ağaçlara da otomatik uygulanır.
    */
@@ -161,12 +267,17 @@ export class ForestSystem {
 
   /**
    * Kimliği verilen ağacı sahneden ve veri yapısından güvenli şekilde kaldırır.
-   * (İleride odun miktarı 0'a düştüğünde doğrudan çağrılabilir.)
    */
   public removeTree(id: string): boolean {
     const node = this.nodesById.get(id);
     if (!node) {
       return false;
+    }
+
+    const activeTween = this.hitTweens.get(id);
+    if (activeTween) {
+      activeTween.stop();
+      this.hitTweens.delete(id);
     }
 
     node.sprite.destroy();
@@ -175,9 +286,7 @@ export class ForestSystem {
     return true;
   }
 
-  /**
-   * Verilen karodaki ağacı kaldırır.
-   */
+  /** Verilen karodaki ağacı kaldırır. */
   public removeTreeAt(col: number, row: number): boolean {
     const node = this.getTreeAt(col, row);
     return node ? this.removeTree(node.id) : false;
@@ -212,12 +321,40 @@ export class ForestSystem {
 
   /** Tüm ağaç nesnelerini temizler. */
   public destroy(): void {
+    for (const tw of this.hitTweens.values()) {
+      tw.stop();
+    }
+    this.hitTweens.clear();
     for (const node of this.nodesById.values()) {
       node.sprite.destroy();
     }
     this.nodesById.clear();
     this.nodesByTile.clear();
     this.ignoredCameras.clear();
+  }
+
+  private playTrunkImpactShake(node: TreeResourceNode, baseX: number): void {
+    const prev = this.hitTweens.get(node.id);
+    if (prev) {
+      prev.stop();
+      node.sprite.x = baseX;
+    }
+
+    const tween = this.scene.tweens.add({
+      targets: node.sprite,
+      x: baseX + 1.3,
+      duration: 45,
+      yoyo: true,
+      repeat: 1,
+      ease: 'Sine.easeInOut',
+      onComplete: () => {
+        if (node.sprite.active) {
+          node.sprite.x = baseX;
+        }
+        this.hitTweens.delete(node.id);
+      },
+    });
+    this.hitTweens.set(node.id, tween);
   }
 
   private tileKey(col: number, row: number): string {

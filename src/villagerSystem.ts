@@ -1,18 +1,27 @@
 /**
- * Karahanlı RTS — Köylü Yönetim, Seçim ve Hareket Sistemi (VillagerSystem)
+ * Karahanlı RTS — Köylü Yönetim, Seçim, Hareket ve Odun Toplama Sistemi (VillagerSystem)
  *
  * Sahnedeki Karahanlı köylü birimlerini yönetir; masaüstü (sol tık seçim,
- * boş alana sol tık seçim kaldırma, sağ tık hareket) ve mobil (dokunarak
- * seçim, seçiliyken boş noktaya dokunarak hareket) kontrollerini kamera
- * sürükleme sistemiyle çakışmadan çalıştırır.
+ * boş alana sol tık seçim kaldırma, sağ tık yürüyüş veya ağaca sağ tık odun kesme)
+ * ve mobil (dokunarak seçim, seçiliyken boş noktaya dokunarak yürüyüş, ağaca
+ * dokunarak odun toplama) kontrollerini kamera sistemiyle uyumlu çalıştırır.
  */
 
 import Phaser from 'phaser';
 import { MapCameraController } from './cameraController';
-import { ForestSystem } from './forestSystem';
+import {
+  ForestSystem,
+  TreeResourceNode,
+  TreeType,
+  WoodHarvestResult,
+} from './forestSystem';
 import { IsoGrid } from './isoGrid';
-import { findSmoothGridPath, GridObstacleQuery } from './pathfinding';
-import { Villager, VillagerConfig } from './villager';
+import {
+  findSmoothGridPath,
+  GridCoord,
+  GridObstacleQuery,
+} from './pathfinding';
+import { Villager, VillagerConfig, VillagerState } from './villager';
 
 /** Haritanın orta açık çayırındaki ilk Karahanlı köylüsünün başlangıç konumu */
 export const INITIAL_VILLAGER_SPAWN: VillagerConfig = {
@@ -20,6 +29,20 @@ export const INITIAL_VILLAGER_SPAWN: VillagerConfig = {
   col: 8,
   row: 7,
 };
+
+/** Ağaç gövdesinin hemen yanında balta vurmak için ideal ızgara mesafesi (> 0.78 engel yarıçapı) */
+const CHOP_STAND_RADIUS = 0.86;
+
+export interface VillagerHudStatus {
+  carriedWood: number;
+  maxCapacity: number;
+  isSelected: boolean;
+  state: VillagerState;
+  targetTreeType: TreeType | null;
+  targetTreeWood: number | null;
+  targetTreeMaxWood: number | null;
+  remainingTreesCount: number;
+}
 
 export class VillagerSystem {
   private readonly scene: Phaser.Scene;
@@ -47,11 +70,10 @@ export class VillagerSystem {
 
     Villager.ensureAnimations(scene);
 
-    // Hareket komutu verildiğinde hedef noktada kısa süreli beliren ince yeşil halka
+    // Hareket veya ağaç hedefi verildiğinde zeminde kısa süreli beliren halka
     this.moveMarker = scene.add.graphics();
     this.moveMarker.setDepth(5);
     this.moveMarker.setVisible(false);
-    this.drawMoveMarkerGraphic();
 
     this.bindInputEvents();
   }
@@ -129,8 +151,77 @@ export class VillagerSystem {
   }
 
   /**
+   * Ekran arayüzünde (HUD) köylünün taşıdığı odun miktarını ve durumunu
+   * göstermek için özet bilgi üretir.
+   */
+  public getHudStatus(): VillagerHudStatus | null {
+    const selected = this.getSelectedVillagers()[0];
+    const primary = selected ?? this.villagers.values().next().value;
+    if (!primary) {
+      return null;
+    }
+
+    const treeId = primary.getTargetTreeId();
+    const targetTree = treeId ? this.forestSystem.getTree(treeId) : undefined;
+
+    return {
+      carriedWood: primary.getCarriedWood(),
+      maxCapacity: primary.getMaxWoodCapacity(),
+      isSelected: primary.isSelected(),
+      state: primary.getState(),
+      targetTreeType: targetTree?.treeType ?? null,
+      targetTreeWood: targetTree ? targetTree.woodAmount : null,
+      targetTreeMaxWood: targetTree ? targetTree.maxWoodAmount : null,
+      remainingTreesCount: this.forestSystem.getAllTrees().length,
+    };
+  }
+
+  /**
+   * Seçili köylülere verilen ağaca yürüyüp balta ile odun toplama emri verir.
+   */
+  public commandHarvestSelectedTree(tree: TreeResourceNode): boolean {
+    if (this.selectedIds.size === 0) {
+      return false;
+    }
+
+    const obstacleQuery = this.createObstacleQuery();
+    let anyOrdered = false;
+
+    for (const unit of this.getSelectedVillagers()) {
+      const startPos = unit.getGridPosition();
+      const distToTree = Math.hypot(
+        startPos.col - tree.tile.col,
+        startPos.row - tree.tile.row
+      );
+
+      // Köylü zaten ağacın hemen yanındaysa yürütmeden doğrudan kesime başlat
+      if (distToTree >= 0.76 && distToTree <= 1.06) {
+        unit.setHarvestTreeOrder(tree.id, [], this.forestSystem);
+        anyOrdered = true;
+        continue;
+      }
+
+      const chopSpot = this.computeBestChopSpot(startPos, tree, obstacleQuery);
+      if (!chopSpot) {
+        continue;
+      }
+
+      const waypoints = findSmoothGridPath(startPos, chopSpot, obstacleQuery);
+      unit.setHarvestTreeOrder(tree.id, waypoints, this.forestSystem);
+      anyOrdered = true;
+    }
+
+    if (anyOrdered) {
+      const treeWorld = this.isoGrid.tileToWorld(tree.tile.col, tree.tile.row);
+      this.playOrderFeedback(treeWorld.x, treeWorld.y, 0xf59e0b);
+    }
+
+    return anyOrdered;
+  }
+
+  /**
    * Seçili köylüleri verilen dünya koordinatına (worldX, worldY) engelsiz bir
-   * rotayla yürütür. Yeni hedef verildiğinde mevcut yürüyüş anında güncellenir.
+   * rotayla yürütür. Odun toplama yapılıyorsa anında bırakılıp yeni hedefe gidilir.
    */
   public commandMoveSelectedToWorld(worldX: number, worldY: number): boolean {
     if (this.selectedIds.size === 0) {
@@ -142,13 +233,7 @@ export class VillagerSystem {
     }
 
     const rawTile = this.isoGrid.worldToTile(worldX, worldY);
-    const obstacleQuery: GridObstacleQuery = {
-      cols: this.isoGrid.getCols(),
-      rows: this.isoGrid.getRows(),
-      isTileBlocked: (col: number, row: number) =>
-        !this.isoGrid.isInBounds(col, row) ||
-        this.forestSystem.getTreeAt(col, row) !== undefined,
-    };
+    const obstacleQuery = this.createObstacleQuery();
 
     let anyMoved = false;
     let destinationWorld: { x: number; y: number } | null = null;
@@ -161,20 +246,24 @@ export class VillagerSystem {
         const last = waypoints[waypoints.length - 1];
         destinationWorld = this.isoGrid.tileToWorld(last.col, last.row);
         anyMoved = true;
+      } else {
+        unit.stopMovement();
       }
     }
 
     if (anyMoved && destinationWorld) {
-      this.playMoveFeedback(destinationWorld.x, destinationWorld.y);
+      this.playOrderFeedback(destinationWorld.x, destinationWorld.y, 0x4ade80);
     }
 
     return anyMoved;
   }
 
-  /** Her karede tüm köylülerin hareket ve animasyonlarını günceller. */
+  /** Her karede tüm köylülerin yürüyüş ve odun toplama döngülerini günceller. */
   public update(deltaMs: number): void {
     for (const unit of this.villagers.values()) {
-      unit.update(deltaMs);
+      unit.update(deltaMs, this.forestSystem, (villager, result) => {
+        this.spawnWoodHarvestPop(villager, result);
+      });
     }
   }
 
@@ -203,8 +292,70 @@ export class VillagerSystem {
     this.ignoredCameras.clear();
   }
 
+  private createObstacleQuery(): GridObstacleQuery {
+    return {
+      cols: this.isoGrid.getCols(),
+      rows: this.isoGrid.getRows(),
+      isTileBlocked: (col: number, row: number) =>
+        !this.isoGrid.isInBounds(col, row) ||
+        this.forestSystem.getTreeAt(col, row) !== undefined,
+    };
+  }
+
+  /**
+   * Ağacın etrafındaki açık karolar arasından köylüye en yakın ve baltanın
+   * gövdeye doğal açıyla temas ettiği kesim noktasını hesaplar.
+   */
+  private computeBestChopSpot(
+    fromPos: GridCoord,
+    tree: TreeResourceNode,
+    grid: GridObstacleQuery
+  ): GridCoord | null {
+    const tc = tree.tile.col;
+    const tr = tree.tile.row;
+
+    // Önce izometrik gövde yanlarını (4 ana yön), gerekirse köşeleri dene
+    const candidateDirs: ReadonlyArray<{
+      dc: number;
+      dr: number;
+      bias: number;
+    }> = [
+      { dc: -1, dr: 0, bias: 0 },
+      { dc: 0, dr: 1, bias: 0 },
+      { dc: 1, dr: 0, bias: 0 },
+      { dc: 0, dr: -1, bias: 0 },
+      { dc: -1, dr: 1, bias: 0.35 },
+      { dc: 1, dr: -1, bias: 0.35 },
+      { dc: 1, dr: 1, bias: 0.45 },
+      { dc: -1, dr: -1, bias: 0.45 },
+    ];
+
+    let bestSpot: GridCoord | null = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    for (const { dc, dr, bias } of candidateDirs) {
+      const neighborCol = tc + dc;
+      const neighborRow = tr + dr;
+      if (grid.isTileBlocked(neighborCol, neighborRow)) {
+        continue;
+      }
+
+      const len = Math.hypot(dc, dr);
+      const spotCol = tc + (dc / len) * CHOP_STAND_RADIUS;
+      const spotRow = tr + (dr / len) * CHOP_STAND_RADIUS;
+
+      const dist = Math.hypot(spotCol - fromPos.col, spotRow - fromPos.row);
+      const score = dist + bias;
+      if (score < bestScore) {
+        bestScore = score;
+        bestSpot = { col: spotCol, row: spotRow };
+      }
+    }
+
+    return bestSpot;
+  }
+
   private bindInputEvents(): void {
-    // Sağ tık tarayıcı menüsünü devre dışı bırak (masaüstü sağ tık yürüyüş komutu için)
     this.scene.input.mouse?.disableContextMenu();
     this.scene.input.on('pointerup', this.handlePointerUp, this);
     this.scene.input.on('pointermove', this.handlePointerHover, this);
@@ -215,19 +366,43 @@ export class VillagerSystem {
       return;
     }
     const worldPt = this.scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
-    const hovered = this.pickTopmostVillagerAt(worldPt.x, worldPt.y, false);
-    this.scene.input.setDefaultCursor(hovered ? 'pointer' : 'default');
+    const hoveredVillager = this.pickTopmostVillagerAt(
+      worldPt.x,
+      worldPt.y,
+      false
+    );
+    if (hoveredVillager) {
+      this.scene.input.setDefaultCursor('pointer');
+      return;
+    }
+
+    if (this.selectedIds.size > 0) {
+      const hoveredTree = this.forestSystem.pickTreeAtWorld(
+        worldPt.x,
+        worldPt.y,
+        false
+      );
+      if (hoveredTree) {
+        this.scene.input.setDefaultCursor('pointer');
+        return;
+      }
+    }
+
+    this.scene.input.setDefaultCursor('default');
   }
 
   private handlePointerUp(pointer: Phaser.Input.Pointer): void {
-    // Kamera sürükleme veya iki parmak yakınlaştırma yapıldıysa birim komutu tetikleme
     if (this.cameraController.wasPointerGestureDragged()) {
       return;
     }
 
     const worldPt = this.scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
     const isTouch = pointer.wasTouch;
-    const hitVillager = this.pickTopmostVillagerAt(worldPt.x, worldPt.y, isTouch);
+    const hitVillager = this.pickTopmostVillagerAt(
+      worldPt.x,
+      worldPt.y,
+      isTouch
+    );
 
     if (isTouch) {
       // MOBİL DOKUNMATİK KONTROLLER:
@@ -237,12 +412,22 @@ export class VillagerSystem {
         return;
       }
 
-      // 2) Köylü seçiliyken haritadaki boş bir noktaya dokunulduysa -> oraya yürüt
+      // 2) Köylü seçiliyken bir ağaca dokunulduysa -> ağaca yürü ve odun topla
       if (this.selectedIds.size > 0) {
+        const hitTree = this.forestSystem.pickTreeAtWorld(
+          worldPt.x,
+          worldPt.y,
+          true
+        );
+        if (hitTree) {
+          this.commandHarvestSelectedTree(hitTree);
+          return;
+        }
+
+        // 3) Köylü seçiliyken haritadaki boş bir noktaya dokunulduysa -> oraya yürüt (kesimi bırakır)
         if (this.isoGrid.isWorldPointOnMap(worldPt.x, worldPt.y)) {
           this.commandMoveSelectedToWorld(worldPt.x, worldPt.y);
         } else {
-          // Harita dışındaki boşluğa dokunulduğunda seçimi kaldır
           this.clearSelection();
         }
       }
@@ -263,13 +448,21 @@ export class VillagerSystem {
     }
 
     if (isRightClick && this.selectedIds.size > 0) {
+      // Önce sağ tıklanan noktada bir ağaç var mı kontrol et
+      const hitTree = this.forestSystem.pickTreeAtWorld(
+        worldPt.x,
+        worldPt.y,
+        false
+      );
+      if (hitTree) {
+        this.commandHarvestSelectedTree(hitTree);
+        return;
+      }
+
       this.commandMoveSelectedToWorld(worldPt.x, worldPt.y);
     }
   }
 
-  /**
-   * Tıklanan noktada birden fazla köylü varsa ekranda en önde (yüksek depth) olanı seçer.
-   */
   private pickTopmostVillagerAt(
     worldX: number,
     worldY: number,
@@ -291,14 +484,16 @@ export class VillagerSystem {
     return best;
   }
 
-  private drawMoveMarkerGraphic(): void {
-    this.moveMarker.clear();
-    this.moveMarker.lineStyle(1.3, 0x4ade80, 0.9);
-    this.moveMarker.strokeEllipse(0, 0, 18, 9);
-  }
-
-  private playMoveFeedback(worldX: number, worldY: number): void {
+  private playOrderFeedback(
+    worldX: number,
+    worldY: number,
+    strokeColor: number
+  ): void {
     this.moveMarkerTween?.stop();
+    this.moveMarker.clear();
+    this.moveMarker.lineStyle(1.4, strokeColor, 0.92);
+    this.moveMarker.strokeEllipse(0, 0, 18, 9);
+
     this.moveMarker.setPosition(worldX, worldY);
     this.moveMarker.setScale(0.55);
     this.moveMarker.setAlpha(0.95);
@@ -306,13 +501,50 @@ export class VillagerSystem {
 
     this.moveMarkerTween = this.scene.tweens.add({
       targets: this.moveMarker,
-      scaleX: 1.2,
-      scaleY: 1.2,
+      scaleX: 1.25,
+      scaleY: 1.25,
       alpha: 0,
       duration: 340,
       ease: 'Quad.easeOut',
       onComplete: () => {
         this.moveMarker.setVisible(false);
+      },
+    });
+  }
+
+  /**
+   * Her balta darbesiyle 1 odun alındığında ağacın yanında küçük bir "+1" ve
+   * ahşap yongası efekti oluşturur.
+   */
+  private spawnWoodHarvestPop(
+    villager: Villager,
+    result: WoodHarvestResult
+  ): void {
+    const vPos = villager.getWorldPosition();
+    const popText = this.scene.add
+      .text(vPos.x, vPos.y - 36, `+${result.harvested} Odun`, {
+        fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+        fontSize: '11px',
+        fontStyle: 'bold',
+        color: '#fcd34d',
+        stroke: '#1e1b18',
+        strokeThickness: 2.5,
+      })
+      .setOrigin(0.5, 1)
+      .setDepth(vPos.y + 2200);
+
+    for (const cam of this.ignoredCameras) {
+      cam.ignore(popText);
+    }
+
+    this.scene.tweens.add({
+      targets: popText,
+      y: vPos.y - 50,
+      alpha: 0,
+      duration: 550,
+      ease: 'Cubic.easeOut',
+      onComplete: () => {
+        popText.destroy();
       },
     });
   }

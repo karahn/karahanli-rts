@@ -4,7 +4,7 @@
  * Phaser 3 + TypeScript + Vite tabanlı 2D gerçek zamanlı strateji oyunu.
  * 16x16 dikişsiz izometrik çimen haritayı, doğal koruluk yerleşimindeki
  * 2 kayın + 2 çam odun kaynağını (her biri 100 odun), ilk Karahanlı köylüsünü,
- * birim seçim/yürüyüş sistemini ve kamera kontrolcüsünü sahnede çalıştırır.
+ * odun toplama mekaniğini (20 odun kapasite) ve kamera sistemini çalıştırır.
  */
 
 import Phaser from 'phaser';
@@ -13,11 +13,11 @@ import { ForestSystem } from './forestSystem';
 import { IsoGrid } from './isoGrid';
 import { VillagerSystem } from './villagerSystem';
 
-/** Arayüz (UI) metinleri için en üst derinlik katmanı */
+/** Arayüz (UI) öğeleri için en üst derinlik katmanı */
 const UI_DEPTH = 5000;
 
-/** Üst başlık alanı için ayrılan ekran yüksekliği (px) */
-const TOP_HUD_INSET = 78;
+/** Üst başlık ve odun göstergesi için ayrılan ekran yüksekliği (px) */
+const TOP_HUD_INSET = 104;
 
 class MainScene extends Phaser.Scene {
   private isoGrid?: IsoGrid;
@@ -25,8 +25,13 @@ class MainScene extends Phaser.Scene {
   private villagerSystem?: VillagerSystem;
   private cameraController?: MapCameraController;
   private uiCamera?: Phaser.Cameras.Scene2D.Camera;
+
   private titleText?: Phaser.GameObjects.Text;
   private subtitleText?: Phaser.GameObjects.Text;
+  private woodPanelBg?: Phaser.GameObjects.Graphics;
+  private woodStatusText?: Phaser.GameObjects.Text;
+  private lastWoodHudLine = '';
+  private lastWoodFull = false;
 
   constructor() {
     super({ key: 'MainScene' });
@@ -61,7 +66,7 @@ class MainScene extends Phaser.Scene {
       topUiInset: TOP_HUD_INSET,
     });
 
-    // İlk Karahanlı köylüsü, seçim halkası ve engelsiz yürüyüş sistemi
+    // İlk Karahanlı köylüsü, seçim halkası, yürüyüş ve odun toplama sistemi
     this.villagerSystem = new VillagerSystem(
       this,
       this.isoGrid,
@@ -70,11 +75,11 @@ class MainScene extends Phaser.Scene {
     );
     this.villagerSystem.spawnInitialVillager();
 
-    // Sabit üst başlık ve kontrol bilgisi metinleri
+    // Sabit üst başlık, kontrol açıklaması ve köylü odun taşıma göstergesi
     this.titleText = this.add
       .text(0, 0, 'KARAHANLI RTS', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-        fontSize: '22px',
+        fontSize: '21px',
         fontStyle: 'bold',
         color: '#f8fafc',
       })
@@ -85,10 +90,10 @@ class MainScene extends Phaser.Scene {
       .text(
         0,
         0,
-        'Sol Tık / Dokun: Köylü Seç  •  Sağ Tık / Dokun: Yürüt  •  Sürükle / Tekerlek: Kamera',
+        'Sol Tık / Dokun: Seç  •  Ağaca Sağ Tık / Dokun: Odun Kes  •  Zemine Sağ Tık / Dokun: Yürüt',
         {
           fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-          fontSize: '13px',
+          fontSize: '12px',
           color: '#94a3b8',
           align: 'center',
         }
@@ -96,9 +101,26 @@ class MainScene extends Phaser.Scene {
       .setOrigin(0.5, 0)
       .setDepth(UI_DEPTH);
 
+    this.woodPanelBg = this.add.graphics().setDepth(UI_DEPTH);
+
+    this.woodStatusText = this.add
+      .text(0, 0, '', {
+        fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+        fontSize: '13px',
+        fontStyle: 'bold',
+        color: '#e2e8f0',
+      })
+      .setOrigin(0.5, 0.5)
+      .setDepth(UI_DEPTH + 1);
+
     // Arayüz metinlerini yakınlaştırmadan/kaydırmadan bağımsız tutan şeffaf HUD kamerası
     this.uiCamera = this.cameras.add(0, 0, width, height, false, 'HudCamera');
-    this.cameras.main.ignore([this.titleText, this.subtitleText]);
+    this.cameras.main.ignore([
+      this.titleText,
+      this.subtitleText,
+      this.woodPanelBg,
+      this.woodStatusText,
+    ]);
 
     const terrainImg = this.isoGrid.getTerrainImage();
     if (terrainImg) {
@@ -107,6 +129,7 @@ class MainScene extends Phaser.Scene {
     this.forestSystem.ignoreOnCamera(this.uiCamera);
     this.villagerSystem.ignoreOnCamera(this.uiCamera);
 
+    this.refreshWoodHud(true);
     this.layoutHud(width);
     this.scale.on('resize', this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.cleanup, this);
@@ -115,16 +138,81 @@ class MainScene extends Phaser.Scene {
   public update(_time: number, delta: number): void {
     this.cameraController?.update(delta);
     this.villagerSystem?.update(delta);
+    this.refreshWoodHud(false);
+  }
+
+  private refreshWoodHud(force: boolean): void {
+    if (!this.villagerSystem || !this.woodStatusText) {
+      return;
+    }
+
+    const status = this.villagerSystem.getHudStatus();
+    if (!status) {
+      return;
+    }
+
+    const isFull = status.carriedWood >= status.maxCapacity;
+    const capNote = isFull ? ' (Dolu)' : '';
+    let detailPart = `Orman: ${status.remainingTreesCount} Ağaç`;
+
+    if (
+      status.targetTreeType !== null &&
+      status.targetTreeWood !== null &&
+      status.targetTreeMaxWood !== null
+    ) {
+      const treeName = status.targetTreeType === 'cam' ? 'Çam' : 'Kayın';
+      const actionLabel = status.state === 'chopping' ? 'Kesiliyor' : 'Hedef';
+      detailPart = `${treeName} (${actionLabel}): ${status.targetTreeWood} / ${status.targetTreeMaxWood}`;
+    }
+
+    const line = `Taşınan Odun: ${status.carriedWood} / ${status.maxCapacity}${capNote}   •   ${detailPart}`;
+    if (!force && line === this.lastWoodHudLine && isFull === this.lastWoodFull) {
+      return;
+    }
+
+    this.lastWoodHudLine = line;
+    this.lastWoodFull = isFull;
+    this.woodStatusText.setText(line);
+    this.woodStatusText.setColor(isFull ? '#fbbf24' : '#f1f5f9');
+    this.drawWoodPillBackground(this.scale.width);
   }
 
   private layoutHud(width: number): void {
     const isCompact = width < 560;
-    this.titleText?.setFontSize(isCompact ? 18 : 22);
-    this.subtitleText?.setFontSize(isCompact ? 11 : 13);
+    this.titleText?.setFontSize(isCompact ? 17 : 21);
+    this.subtitleText?.setFontSize(isCompact ? 11 : 12);
     this.subtitleText?.setWordWrapWidth(Math.max(width - 24, 240));
+    this.woodStatusText?.setFontSize(isCompact ? 11 : 13);
 
-    this.titleText?.setPosition(width / 2, isCompact ? 14 : 20);
-    this.subtitleText?.setPosition(width / 2, isCompact ? 38 : 50);
+    this.titleText?.setPosition(width / 2, isCompact ? 10 : 14);
+    this.subtitleText?.setPosition(width / 2, isCompact ? 32 : 40);
+    this.woodStatusText?.setPosition(width / 2, isCompact ? 74 : 76);
+
+    this.drawWoodPillBackground(width);
+  }
+
+  private drawWoodPillBackground(screenWidth: number): void {
+    if (!this.woodPanelBg || !this.woodStatusText) {
+      return;
+    }
+
+    const isCompact = screenWidth < 560;
+    const centerY = isCompact ? 74 : 76;
+    const textW = this.woodStatusText.width;
+    const pillW = Math.min(screenWidth - 20, Math.max(220, textW + 28));
+    const pillH = isCompact ? 24 : 26;
+    const x = (screenWidth - pillW) * 0.5;
+    const y = centerY - pillH * 0.5;
+
+    this.woodPanelBg.clear();
+    this.woodPanelBg.fillStyle(0x1e293b, 0.88);
+    this.woodPanelBg.fillRoundedRect(x, y, pillW, pillH, 12);
+    this.woodPanelBg.lineStyle(
+      1,
+      this.lastWoodFull ? 0xf59e0b : 0x475569,
+      0.9
+    );
+    this.woodPanelBg.strokeRoundedRect(x, y, pillW, pillH, 12);
   }
 
   private handleResize(gameSize: Phaser.Structs.Size): void {
