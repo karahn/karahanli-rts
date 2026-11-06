@@ -27,9 +27,7 @@ class MainScene extends Phaser.Scene {
       cols: 8,
       rows: 8,
       tileWidth: 72,
-      tileHeight: 36,
-      fillColor: 0x2d6a4f,
-      strokeColor: 0x74c69d
+      tileHeight: 36
     });
     this.isoGrid.setPosition(width / 2, height / 2 + 24);
 
@@ -43,7 +41,7 @@ class MainScene extends Phaser.Scene {
       .setOrigin(0.5);
 
     this.subtitleText = this.add
-      .text(width / 2, 76, 'İzometrik Zemin (8x8 Tile Grid)', {
+      .text(width / 2, 76, 'İzometrik Çimen Arazi (8×8 Tile Grid)', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         fontSize: '15px',
         color: '#94a3b8'
