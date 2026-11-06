@@ -7,6 +7,7 @@
 import Phaser from 'phaser';
 
 class MainScene extends Phaser.Scene {
+  private centerRect?: Phaser.GameObjects.Graphics;
   private titleText?: Phaser.GameObjects.Text;
   private subtitleText?: Phaser.GameObjects.Text;
 
@@ -21,8 +22,18 @@ class MainScene extends Phaser.Scene {
   create(): void {
     const { width, height } = this.scale;
 
+    const rectWidth = 220;
+    const rectHeight = 130;
+
+    this.centerRect = this.add.graphics();
+    this.centerRect.fillStyle(0x10b981, 1);
+    this.centerRect.fillRect(-rectWidth / 2, -rectHeight / 2, rectWidth, rectHeight);
+    this.centerRect.lineStyle(3, 0xf59e0b, 1);
+    this.centerRect.strokeRect(-rectWidth / 2, -rectHeight / 2, rectWidth, rectHeight);
+    this.centerRect.setPosition(width / 2, height / 2);
+
     this.titleText = this.add
-      .text(width / 2, height / 2 - 14, 'KARAHANLI RTS', {
+      .text(width / 2, height / 2 - 120, 'KARAHANLI RTS', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         fontSize: '32px',
         fontStyle: 'bold',
@@ -31,7 +42,7 @@ class MainScene extends Phaser.Scene {
       .setOrigin(0.5);
 
     this.subtitleText = this.add
-      .text(width / 2, height / 2 + 24, 'Phaser 3 + TypeScript Temel Proje Hazır', {
+      .text(width / 2, height / 2 - 86, 'Phaser 3 + TypeScript Temel Proje Hazır', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         fontSize: '15px',
         color: '#94a3b8'
@@ -43,8 +54,9 @@ class MainScene extends Phaser.Scene {
 
   private handleResize(gameSize: Phaser.Structs.Size): void {
     const { width, height } = gameSize;
-    this.titleText?.setPosition(width / 2, height / 2 - 14);
-    this.subtitleText?.setPosition(width / 2, height / 2 + 24);
+    this.centerRect?.setPosition(width / 2, height / 2);
+    this.titleText?.setPosition(width / 2, height / 2 - 120);
+    this.subtitleText?.setPosition(width / 2, height / 2 - 86);
   }
 
   update(_time: number, _delta: number): void {
