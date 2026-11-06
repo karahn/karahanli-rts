@@ -26,10 +26,10 @@ class MainScene extends Phaser.Scene {
     this.isoGrid = new IsoGrid(this, {
       cols: 8,
       rows: 8,
-      tileWidth: 72,
-      tileHeight: 36
+      tileWidth: 64,
+      tileHeight: 32
     });
-    this.isoGrid.setPosition(width / 2, height / 2 + 24);
+    this.isoGrid.setPosition(width / 2, height / 2 + 20);
 
     this.titleText = this.add
       .text(width / 2, 42, 'KARAHANLI RTS', {
@@ -41,7 +41,7 @@ class MainScene extends Phaser.Scene {
       .setOrigin(0.5);
 
     this.subtitleText = this.add
-      .text(width / 2, 76, 'İzometrik Çimen Arazi (8×8 Tile Grid)', {
+      .text(width / 2, 76, 'İzometrik Çimen Arazi (8×8 Harita • 64×32 Tile)', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
         fontSize: '15px',
         color: '#94a3b8'
@@ -53,7 +53,7 @@ class MainScene extends Phaser.Scene {
 
   private handleResize(gameSize: Phaser.Structs.Size): void {
     const { width, height } = gameSize;
-    this.isoGrid?.setPosition(width / 2, height / 2 + 24);
+    this.isoGrid?.setPosition(width / 2, height / 2 + 20);
     this.titleText?.setPosition(width / 2, 42);
     this.subtitleText?.setPosition(width / 2, 76);
   }

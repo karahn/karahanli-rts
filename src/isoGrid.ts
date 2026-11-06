@@ -1,17 +1,24 @@
 /**
  * Karahanlı RTS — İzometrik Çimen Arazi (Tile) Sistemi
- * 2:1 izometrik projeksiyon ve 8×8 karo (tile) düzenini koruyarak,
- * prosedürel çok katmanlı bozkır/çayır çimen dokusunu tek bir Phaser CanvasTexture
- * üzerinde boşluksuz (seamless) ve mobil dostu (tek draw call) olarak üretir.
+ * 64×32 piksel kesintisiz (seamless) izometrik çimen karosu dokularını kullanarak
+ * 8×8 haritayı boşluksuz, tekrarlayan desenlerden arındırılmış ve mobil uyumlu
+ * (tek WebGL draw call) biçimde oluşturur.
  */
 
 import Phaser from 'phaser';
+import {
+  ensureGrassTileAtlas,
+  fbm2D,
+  GRASS_TILE_HEIGHT,
+  GRASS_TILE_WIDTH,
+  hash2D
+} from './grassTexture';
 
 export interface IsoGridOptions {
   cols: number;
   rows: number;
-  tileWidth: number;
-  tileHeight: number;
+  tileWidth?: number;
+  tileHeight?: number;
   seed?: number;
   showGridLines?: boolean;
 }
@@ -24,18 +31,18 @@ export class IsoGrid {
   private readonly tileHeight: number;
   private readonly seed: number;
   private readonly showGridLines: boolean;
-  private readonly textureKey: string;
+  private readonly mapTextureKey: string;
   private terrainImage?: Phaser.GameObjects.Image;
 
   constructor(scene: Phaser.Scene, options: IsoGridOptions) {
     this.scene = scene;
     this.cols = options.cols;
     this.rows = options.rows;
-    this.tileWidth = options.tileWidth;
-    this.tileHeight = options.tileHeight;
-    this.seed = options.seed ?? 1040;
+    this.tileWidth = options.tileWidth ?? GRASS_TILE_WIDTH;
+    this.tileHeight = options.tileHeight ?? GRASS_TILE_HEIGHT;
+    this.seed = options.seed ?? 1071;
     this.showGridLines = options.showGridLines ?? true;
-    this.textureKey = `karahanli-iso-grass-${this.cols}x${this.rows}-${this.seed}`;
+    this.mapTextureKey = `karahanli-iso-map-${this.cols}x${this.rows}-${this.tileWidth}x${this.tileHeight}-s${this.seed}`;
 
     this.draw();
   }
@@ -77,9 +84,12 @@ export class IsoGrid {
   }
 
   /**
-   * 8×8 izometrik çimen arazi dokusunu oluşturur ve sahneye tek bir GPU dokusu olarak ekler.
+   * 64×32 çimen dokusu atlasını üretir, komşu tekrarını önleyen varyant matrisiyle
+   * 8×8 haritanın tamamına uygular ve tek bir GPU dokusu olarak sahneye yerleştirir.
    */
   public draw(): void {
+    const atlas = ensureGrassTileAtlas(this.scene, this.seed);
+
     const halfW = this.tileWidth / 2;
     const halfH = this.tileHeight / 2;
 
@@ -89,101 +99,94 @@ export class IsoGrid {
     const leftCorner = this.planeToLocalIso(0, this.rows);
 
     const pad = 4;
-    const skirtDepth = 7;
+    const skirtDepth = 6;
 
     const spanLeft = -leftCorner.x;
     const spanRight = rightCorner.x;
     const spanTop = -topCorner.y;
     const spanBottom = bottomCorner.y;
 
-    const logicalWidth = Math.ceil(spanLeft + spanRight + pad * 2);
-    const logicalHeight = Math.ceil(spanTop + spanBottom + skirtDepth + pad * 2);
+    const canvasWidth = Math.ceil(spanLeft + spanRight + pad * 2);
+    const canvasHeight = Math.ceil(spanTop + spanBottom + skirtDepth + pad * 2);
 
-    const originX = pad + spanLeft;
-    const originY = pad + spanTop;
+    const originX = Math.round(pad + spanLeft);
+    const originY = Math.round(pad + spanTop);
 
-    // Mobil ve Retina ekranlar için dengeli çözünürlük (maksimum 2x ile sınırlı)
-    const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
-    const canvasWidth = Math.ceil(logicalWidth * dpr);
-    const canvasHeight = Math.ceil(logicalHeight * dpr);
-
-    if (this.scene.textures.exists(this.textureKey)) {
-      this.scene.textures.remove(this.textureKey);
+    if (this.scene.textures.exists(this.mapTextureKey)) {
+      this.scene.textures.remove(this.mapTextureKey);
     }
 
-    const canvasTexture = this.scene.textures.createCanvas(
-      this.textureKey,
+    const mapCanvas = this.scene.textures.createCanvas(
+      this.mapTextureKey,
       canvasWidth,
       canvasHeight
     );
 
-    if (!canvasTexture) {
+    if (!mapCanvas) {
       return;
     }
 
-    const ctx = canvasTexture.getContext();
-
-    // 1) Karo bazlı hafif ton varyasyonu tablosu (8×8 karolar arası yumuşak geçiş için)
-    const tileTones = this.buildTileToneField();
-
-    // 2) Piksel düzeyinde kesintisiz (boşluksuz) izometrik çimen dokusu sentezi
+    const ctx = mapCanvas.getContext();
     const imageData = ctx.createImageData(canvasWidth, canvasHeight);
-    const data = imageData.data;
+    const out = imageData.data;
 
-    const topCanvasX = originX + topCorner.x;
-    const topCanvasY = originY + topCorner.y;
+    // 1) Tekrarlayan desenleri önlemek için komşu karoların aynı varyantı kullanmadığı 8×8 varyant tablosu
+    const variantGrid = this.buildNonRepeatingVariantGrid(atlas.variantCount);
 
-    // Kenar yumuşatma (anti-aliasing) için ekran pikseli başına (u, v) gradyan büyüklüğü
-    const edgeGradPerDevicePx =
-      (0.5 * Math.hypot(1 / halfW, 1 / halfH)) / dpr;
+    // 2) Her bir 8×8 karoya karşılık gelen 64×32 piksel çimen dokusunu tam sayı kafes koordinatlarına yerleştir
+    const topApexX = Math.round(originX + topCorner.x);
+    const topApexY = Math.round(originY + topCorner.y);
 
-    for (let py = 0; py < canvasHeight; py++) {
-      const ly = (py + 0.5) / dpr;
-      const dy = ly - topCanvasY;
+    for (let row = 0; row < this.rows; row++) {
+      for (let col = 0; col < this.cols; col++) {
+        const variantIdx = variantGrid[row][col];
+        const tilePixels = atlas.variants[variantIdx];
 
-      for (let px = 0; px < canvasWidth; px++) {
-        const lx = (px + 0.5) / dpr;
-        const dx = lx - topCanvasX;
+        // 64×32 karonun sol-üst çerçeve başlangıç koordinatı
+        const tileLeft = topApexX + (col - row) * halfW - halfW;
+        const tileTop = topApexY + (col + row) * halfH;
 
-        // Ters izometrik dönüşüm: ekran pikselinden sürekli karo koordinatına (u, v)
-        const u = 0.5 * (dx / halfW + dy / halfH);
-        const v = 0.5 * (dy / halfH - dx / halfW);
+        for (let ty = 0; ty < GRASS_TILE_HEIGHT; ty++) {
+          const dstY = tileTop + ty;
+          if (dstY < 0 || dstY >= canvasHeight) {
+            continue;
+          }
 
-        const minEdgeUV = Math.min(u, this.cols - u, v, this.rows - v);
-        const edgeDistPx = minEdgeUV / edgeGradPerDevicePx;
+          for (let tx = 0; tx < GRASS_TILE_WIDTH; tx++) {
+            const srcIdx = (ty * GRASS_TILE_WIDTH + tx) * 4;
+            if (tilePixels[srcIdx + 3] === 0) {
+              continue;
+            }
 
-        if (edgeDistPx <= -0.75) {
-          continue;
+            const dstX = tileLeft + tx;
+            if (dstX < 0 || dstX >= canvasWidth) {
+              continue;
+            }
+
+            const dstIdx = (dstY * canvasWidth + dstX) * 4;
+            out[dstIdx] = tilePixels[srcIdx];
+            out[dstIdx + 1] = tilePixels[srcIdx + 1];
+            out[dstIdx + 2] = tilePixels[srcIdx + 2];
+            out[dstIdx + 3] = 255;
+          }
         }
-
-        const alpha = Phaser.Math.Clamp(edgeDistPx + 0.65, 0, 1);
-
-        const clampedU = Phaser.Math.Clamp(u, 0, this.cols - 0.0001);
-        const clampedV = Phaser.Math.Clamp(v, 0, this.rows - 0.0001);
-
-        const color = this.sampleGrassColor(
-          clampedU,
-          clampedV,
-          lx,
-          ly,
-          tileTones
-        );
-
-        const idx = (py * canvasWidth + px) * 4;
-        data[idx] = color.r;
-        data[idx + 1] = color.g;
-        data[idx + 2] = color.b;
-        data[idx + 3] = Math.round(alpha * 255);
       }
     }
 
+    // 3) Harita genelinde doğal çayır ışığı / bozkır ton geçişi (yapay karo tekrarını tamamen kırar)
+    this.applyWorldMeadowAtmosphere(
+      out,
+      canvasWidth,
+      canvasHeight,
+      topApexX,
+      topApexY,
+      halfW,
+      halfH
+    );
+
     ctx.putImageData(imageData, 0, 0);
 
-    // 3) Vektörel katmanlar: ön toprak kesiti (skirt), ince çimen tutamları ve hafif 8×8 karo çizgileri
-    ctx.save();
-    ctx.scale(dpr, dpr);
-
-    // 3a) Harita ön kenarlarına tarihî RTS tarzı ince toprak/çim kesiti (üst yüzeyin altına çizilir)
+    // 4) Ön kenar toprak kesiti (skirt), hafif 8×8 taktik ızgara izi ve dış sınır yumuşatması
     ctx.save();
     ctx.globalCompositeOperation = 'destination-over';
     this.drawTerrainSkirt(
@@ -197,238 +200,157 @@ export class IsoGrid {
     );
     ctx.restore();
 
-    // 3b) 8×8 elmas alanının içine kırpılmış doğal mikro çimen yaprakları
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(originX + topCorner.x, originY + topCorner.y);
-    ctx.lineTo(originX + rightCorner.x, originY + rightCorner.y);
-    ctx.lineTo(originX + bottomCorner.x, originY + bottomCorner.y);
-    ctx.lineTo(originX + leftCorner.x, originY + leftCorner.y);
-    ctx.closePath();
-    ctx.clip();
-
-    this.drawGrassTufts(ctx, originX, originY);
-
     if (this.showGridLines) {
-      this.drawSubtleTileGrid(ctx, originX, originY);
-    }
-    ctx.restore();
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(originX + topCorner.x, originY + topCorner.y);
+      ctx.lineTo(originX + rightCorner.x, originY + rightCorner.y);
+      ctx.lineTo(originX + bottomCorner.x, originY + bottomCorner.y);
+      ctx.lineTo(originX + leftCorner.x, originY + leftCorner.y);
+      ctx.closePath();
+      ctx.clip();
 
-    // 3c) Dış sınır çizgisini temiz ve net biçimde çerçevele
+      this.drawSubtleTileGrid(ctx, originX, originY);
+      ctx.restore();
+    }
+
+    // Dış elmas sınırına temiz tarihî RTS çerçeve çizgisi
     ctx.beginPath();
     ctx.moveTo(originX + topCorner.x, originY + topCorner.y);
     ctx.lineTo(originX + rightCorner.x, originY + rightCorner.y);
     ctx.lineTo(originX + bottomCorner.x, originY + bottomCorner.y);
     ctx.lineTo(originX + leftCorner.x, originY + leftCorner.y);
     ctx.closePath();
-    ctx.strokeStyle = 'rgba(28, 46, 20, 0.55)';
-    ctx.lineWidth = 1.1;
+    ctx.strokeStyle = 'rgba(26, 44, 18, 0.52)';
+    ctx.lineWidth = 1;
     ctx.stroke();
 
-    ctx.restore();
-    canvasTexture.refresh();
+    mapCanvas.refresh();
 
     if (this.terrainImage) {
-      this.terrainImage.setTexture(this.textureKey);
+      this.terrainImage.setTexture(this.mapTextureKey);
     } else {
-      this.terrainImage = this.scene.add.image(0, 0, this.textureKey);
+      this.terrainImage = this.scene.add.image(0, 0, this.mapTextureKey);
     }
 
-    this.terrainImage.setOrigin(originX / logicalWidth, originY / logicalHeight);
-    this.terrainImage.setScale(1 / dpr);
+    this.terrainImage.setOrigin(originX / canvasWidth, originY / canvasHeight);
   }
 
   public setPosition(x: number, y: number): void {
-    this.terrainImage?.setPosition(x, y);
+    this.terrainImage?.setPosition(Math.round(x), Math.round(y));
   }
 
   /**
-   * Her karonun (8×8) kendine özgü çok hafif doğal ton farkına sahip olması için
-   * köşe değerleri tablosu üretir; karolar arası geçişte yumuşak enterpolasyonla birleşir.
+   * Yatay, dikey ve çapraz komşu karoların aynı 64×32 dokuyu tekrar kullanmasını engelleyen seçici.
    */
-  private buildTileToneField(): number[][] {
-    const field: number[][] = [];
-    for (let r = 0; r <= this.rows; r++) {
-      const rowValues: number[] = [];
-      for (let c = 0; c <= this.cols; c++) {
-        rowValues.push(this.hash2D(c + 13, r + 29, this.seed + 7) * 2 - 1);
-      }
-      field.push(rowValues);
-    }
-    return field;
-  }
+  private buildNonRepeatingVariantGrid(variantCount: number): number[][] {
+    const grid: number[][] = [];
 
-  /**
-   * Verilen harita düzlemi noktasında (u, v) çok katmanlı doğal bozkır/çayır çimen rengini hesaplar.
-   */
-  private sampleGrassColor(
-    u: number,
-    v: number,
-    lx: number,
-    ly: number,
-    tileTones: number[][]
-  ): { r: number; g: number; b: number } {
-    // Karo bazlı yumuşak varyasyon (keskin kenar oluşturmadan her karoya hafif karakter verir)
-    const col = Math.min(Math.floor(u), this.cols - 1);
-    const row = Math.min(Math.floor(v), this.rows - 1);
-    const fu = this.quintic(u - col);
-    const fv = this.quintic(v - row);
-
-    const t00 = tileTones[row][col];
-    const t10 = tileTones[row][col + 1];
-    const t01 = tileTones[row + 1][col];
-    const t11 = tileTones[row + 1][col + 1];
-    const tileTone = Phaser.Math.Linear(
-      Phaser.Math.Linear(t00, t10, fu),
-      Phaser.Math.Linear(t01, t11, fu),
-      fv
-    );
-
-    // Çok ölçekli doğal çimen gürültüsü (geniş çayır dalgaları + orta kümeler + ince doku)
-    const macro = this.fbm2D(u * 0.72 + 4.1, v * 0.72 + 9.3, 3, this.seed);
-    const meso = this.fbm2D(u * 2.85 + 17.4, v * 2.85 + 3.8, 2, this.seed + 31);
-    const micro = this.valueNoise2D(u * 9.6 + 5.2, v * 9.6 + 21.7, this.seed + 67);
-
-    // Dikey yönlü hafif çim dokusu (ekran uzayında kısa çim lifleri hissi)
-    const bladeGrain = this.valueNoise2D(
-      lx * 0.52 + 11.0,
-      ly * 0.95 + 6.0,
-      this.seed + 101
-    );
-
-    // Kuzeybatıdan gelen hafif güneş ışığı için mikro eğim gölgelemesi
-    const hSampleA = this.fbm2D((u - 0.09) * 1.45, (v - 0.06) * 1.45, 2, this.seed);
-    const hSampleB = this.fbm2D((u + 0.09) * 1.45, (v + 0.06) * 1.45, 2, this.seed);
-    const sunSlope = (hSampleA - hSampleB) * 0.35;
-
-    // Bozkır kuru ot / toprak sıcaklığı yamaları
-    const steppeDryness = this.fbm2D(
-      u * 0.95 + 41.2,
-      v * 0.95 + 58.6,
-      2,
-      this.seed + 149
-    );
-
-    let lushness =
-      macro * 0.44 +
-      meso * 0.27 +
-      micro * 0.14 +
-      bladeGrain * 0.15 +
-      tileTone * 0.07 +
-      sunSlope;
-
-    lushness = Phaser.Math.Clamp(lushness, 0, 1);
-
-    // Tarihî RTS atmosferine uygun doğal bozkır/çayır renk paleti
-    // Koyu gölgeli çim -> tok orta çimen -> güneş alan zeytin yeşili -> sıcak bozkır çimi
-    let r: number;
-    let g: number;
-    let b: number;
-
-    if (lushness < 0.38) {
-      const k = lushness / 0.38;
-      r = Phaser.Math.Linear(47, 68, k);
-      g = Phaser.Math.Linear(77, 104, k);
-      b = Phaser.Math.Linear(37, 47, k);
-    } else if (lushness < 0.72) {
-      const k = (lushness - 0.38) / 0.34;
-      r = Phaser.Math.Linear(68, 94, k);
-      g = Phaser.Math.Linear(104, 131, k);
-      b = Phaser.Math.Linear(47, 57, k);
-    } else {
-      const k = (lushness - 0.72) / 0.28;
-      r = Phaser.Math.Linear(94, 121, k);
-      g = Phaser.Math.Linear(131, 150, k);
-      b = Phaser.Math.Linear(57, 66, k);
-    }
-
-    // Hafif bozkır sıcaklığı geçişi (doğal sarımsı-toprak alt tonu)
-    const dryMix = Phaser.Math.Clamp((steppeDryness - 0.52) * 0.32, 0, 0.13);
-    r = Phaser.Math.Linear(r, 118, dryMix);
-    g = Phaser.Math.Linear(g, 114, dryMix);
-    b = Phaser.Math.Linear(b, 60, dryMix);
-
-    // Harita kenarlarında çok hafif doğal çerçeveleme
-    const borderDist = Math.min(u, this.cols - u, v, this.rows - v);
-    const edgeShade = Phaser.Math.Clamp(borderDist / 0.45, 0, 1);
-    const vignette = 0.93 + 0.07 * edgeShade;
-
-    return {
-      r: Math.round(Phaser.Math.Clamp(r * vignette, 0, 255)),
-      g: Math.round(Phaser.Math.Clamp(g * vignette, 0, 255)),
-      b: Math.round(Phaser.Math.Clamp(b * vignette, 0, 255))
-    };
-  }
-
-  /**
-   * Çimen yüzeyinin üzerinde sade ve doğal duran küçük çim tutamları çizer.
-   */
-  private drawGrassTufts(
-    ctx: CanvasRenderingContext2D,
-    originX: number,
-    originY: number
-  ): void {
-    const tuftsPerTile = 7;
-    const totalTufts = this.cols * this.rows * tuftsPerTile;
-
-    ctx.lineCap = 'round';
-
-    for (let i = 0; i < totalTufts; i++) {
-      const rx = this.hash2D(i, 1, this.seed + 211);
-      const ry = this.hash2D(i, 2, this.seed + 223);
-
-      const u = 0.08 + rx * (this.cols - 0.16);
-      const v = 0.08 + ry * (this.rows - 0.16);
-      const pos = this.planeToLocalIso(u, v);
-
-      const cx = originX + pos.x;
-      const cy = originY + pos.y;
-
-      const patchTone = this.fbm2D(u * 0.72 + 4.1, v * 0.72 + 9.3, 2, this.seed);
-      const bladeCount = this.hash2D(i, 3, this.seed + 239) > 0.55 ? 3 : 2;
-
-      // Tutam kök gölgesi
-      ctx.fillStyle = 'rgba(28, 48, 20, 0.20)';
-      ctx.fillRect(cx - 1.2, cy - 0.3, 2.4, 1.1);
-
-      for (let b = 0; b < bladeCount; b++) {
-        const offsetX = (b - (bladeCount - 1) * 0.5) * 1.35;
-        const lean = (this.hash2D(i * 5 + b, 4, this.seed + 251) - 0.5) * 1.9;
-        const bladeH = 2.1 + this.hash2D(i * 5 + b, 5, this.seed + 263) * 2.1;
-
-        ctx.beginPath();
-        ctx.moveTo(cx + offsetX, cy);
-        ctx.quadraticCurveTo(
-          cx + offsetX + lean * 0.45,
-          cy - bladeH * 0.55,
-          cx + offsetX + lean,
-          cy - bladeH
-        );
-
-        if (patchTone > 0.54) {
-          ctx.strokeStyle = 'rgba(154, 182, 86, 0.34)';
-        } else if (patchTone > 0.36) {
-          ctx.strokeStyle = 'rgba(118, 152, 68, 0.32)';
-        } else {
-          ctx.strokeStyle = 'rgba(78, 114, 49, 0.30)';
+    for (let r = 0; r < this.rows; r++) {
+      const rowArr: number[] = [];
+      for (let c = 0; c < this.cols; c++) {
+        const forbidden = new Set<number>();
+        if (c > 0) {
+          forbidden.add(rowArr[c - 1]);
+        }
+        if (r > 0) {
+          forbidden.add(grid[r - 1][c]);
+          if (c > 0) {
+            forbidden.add(grid[r - 1][c - 1]);
+          }
+          if (c + 1 < this.cols) {
+            forbidden.add(grid[r - 1][c + 1]);
+          }
         }
 
-        ctx.lineWidth = 0.85;
-        ctx.stroke();
+        const startPick = Math.floor(
+          hash2D(c + 17, r + 31, this.seed + 509) * variantCount
+        );
+        let chosen = startPick;
+        for (let step = 0; step < variantCount; step++) {
+          const candidate = (startPick + step * 3) % variantCount;
+          if (!forbidden.has(candidate)) {
+            chosen = candidate;
+            break;
+          }
+        }
+
+        rowArr.push(chosen);
+      }
+      grid.push(rowArr);
+    }
+
+    return grid;
+  }
+
+  /**
+   * 64×32 karoların kesintisiz birleştiği yüzey üzerine harita ölçeğinde hafif güneş/gölge
+   * ve bozkır ton geçişleri uygular; böylece 8×8 haritada yapay tekrar hissi oluşmaz.
+   */
+  private applyWorldMeadowAtmosphere(
+    out: Uint8ClampedArray,
+    canvasWidth: number,
+    canvasHeight: number,
+    topApexX: number,
+    topApexY: number,
+    halfW: number,
+    halfH: number
+  ): void {
+    const edgeGrad = 0.5 * Math.hypot(1 / halfW, 1 / halfH);
+
+    for (let py = 0; py < canvasHeight; py++) {
+      const dy = py + 0.5 - topApexY;
+
+      for (let px = 0; px < canvasWidth; px++) {
+        const idx = (py * canvasWidth + px) * 4;
+        if (out[idx + 3] === 0) {
+          continue;
+        }
+
+        const dx = px + 0.5 - topApexX;
+        const u = 0.5 * (dx / halfW + dy / halfH);
+        const v = 0.5 * (dy / halfH - dx / halfW);
+
+        // Geniş ölçekli güneşli çayır açıklıkları ve gölgeli çukurlar
+        const meadowWave = fbm2D(u * 0.48 + 3.7, v * 0.48 + 8.1, 2, this.seed + 701);
+        const sunSlope =
+          (fbm2D((u - 0.12) * 0.85, (v - 0.08) * 0.85, 2, this.seed + 739) -
+            fbm2D((u + 0.12) * 0.85, (v + 0.08) * 0.85, 2, this.seed + 739)) *
+          0.28;
+        const warmZone = fbm2D(u * 0.62 + 21.5, v * 0.62 + 14.2, 2, this.seed + 787);
+
+        const lightFactor = 0.90 + meadowWave * 0.19 + sunSlope;
+
+        // Dış kenarlarda yumuşak çerçeveleme ve kenar anti-aliasing
+        const borderUV = Math.min(u, this.cols - u, v, this.rows - v);
+        const vignette = 0.94 + 0.06 * Phaser.Math.Clamp(borderUV / 0.5, 0, 1);
+        const edgeAlpha = Phaser.Math.Clamp(borderUV / edgeGrad + 0.75, 0, 1);
+
+        let r = out[idx] * lightFactor * vignette;
+        let g = out[idx + 1] * lightFactor * vignette;
+        let b = out[idx + 2] * lightFactor * vignette;
+
+        // Hafif bozkır güneşi sıcaklığı
+        const warmShift = Phaser.Math.Clamp((warmZone - 0.52) * 0.22, 0, 0.09);
+        r = Phaser.Math.Linear(r, 126, warmShift);
+        g = Phaser.Math.Linear(g, 120, warmShift);
+        b = Phaser.Math.Linear(b, 62, warmShift);
+
+        out[idx] = Math.round(Phaser.Math.Clamp(r, 0, 255));
+        out[idx + 1] = Math.round(Phaser.Math.Clamp(g, 0, 255));
+        out[idx + 2] = Math.round(Phaser.Math.Clamp(b, 0, 255));
+        out[idx + 3] = Math.round(edgeAlpha * 255);
       }
     }
   }
 
-  /**
-   * 8×8 karo yapısını bozmadan çok hafif ve doğal taktiksel karo sınır çizgileri çizer.
-   */
   private drawSubtleTileGrid(
     ctx: CanvasRenderingContext2D,
     originX: number,
     originY: number
   ): void {
-    ctx.strokeStyle = 'rgba(24, 42, 17, 0.14)';
-    ctx.lineWidth = 0.85;
+    ctx.strokeStyle = 'rgba(22, 38, 15, 0.10)';
+    ctx.lineWidth = 0.75;
 
     ctx.beginPath();
     for (let c = 1; c < this.cols; c++) {
@@ -447,9 +369,6 @@ export class IsoGrid {
     ctx.stroke();
   }
 
-  /**
-   * Haritanın ön iki kenarına tarihî RTS sahnelerine özgü ince toprak kesiti çizer.
-   */
   private drawTerrainSkirt(
     ctx: CanvasRenderingContext2D,
     originX: number,
@@ -459,7 +378,6 @@ export class IsoGrid {
     rightCorner: { x: number; y: number },
     skirtDepth: number
   ): void {
-    // Sol-ön kesit (güneş alan toprak yüzeyi)
     ctx.beginPath();
     ctx.moveTo(originX + leftCorner.x, originY + leftCorner.y);
     ctx.lineTo(originX + bottomCorner.x, originY + bottomCorner.y);
@@ -469,62 +387,13 @@ export class IsoGrid {
     ctx.fillStyle = '#473927';
     ctx.fill();
 
-    // Sağ-ön kesit (gölgeli toprak yüzeyi)
     ctx.beginPath();
     ctx.moveTo(originX + bottomCorner.x, originY + bottomCorner.y);
     ctx.lineTo(originX + rightCorner.x, originY + rightCorner.y);
     ctx.lineTo(originX + rightCorner.x, originY + rightCorner.y + skirtDepth);
     ctx.lineTo(originX + bottomCorner.x, originY + bottomCorner.y + skirtDepth);
     ctx.closePath();
-    ctx.fillStyle = '#33281b';
+    ctx.fillStyle = '#312619';
     ctx.fill();
-  }
-
-  private fbm2D(
-    x: number,
-    y: number,
-    octaves: number,
-    seed: number
-  ): number {
-    let total = 0;
-    let amplitude = 0.5;
-    let frequency = 1;
-    let norm = 0;
-
-    for (let i = 0; i < octaves; i++) {
-      total += this.valueNoise2D(x * frequency, y * frequency, seed + i * 19) * amplitude;
-      norm += amplitude;
-      amplitude *= 0.5;
-      frequency *= 2.03;
-    }
-
-    return total / norm;
-  }
-
-  private valueNoise2D(x: number, y: number, seed: number): number {
-    const ix = Math.floor(x);
-    const iy = Math.floor(y);
-    const fx = this.quintic(x - ix);
-    const fy = this.quintic(y - iy);
-
-    const v00 = this.hash2D(ix, iy, seed);
-    const v10 = this.hash2D(ix + 1, iy, seed);
-    const v01 = this.hash2D(ix, iy + 1, seed);
-    const v11 = this.hash2D(ix + 1, iy + 1, seed);
-
-    const nx0 = Phaser.Math.Linear(v00, v10, fx);
-    const nx1 = Phaser.Math.Linear(v01, v11, fx);
-    return Phaser.Math.Linear(nx0, nx1, fy);
-  }
-
-  private quintic(t: number): number {
-    return t * t * t * (t * (t * 6 - 15) + 10);
-  }
-
-  private hash2D(ix: number, iy: number, seed: number): number {
-    let h = Math.imul(ix, 374761393) ^ Math.imul(iy, 668265263) ^ Math.imul(seed, 1442695041);
-    h = Math.imul(h ^ (h >>> 13), 1274126177);
-    h ^= h >>> 16;
-    return (h >>> 0) / 4294967295;
   }
 }
