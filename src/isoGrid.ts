@@ -69,10 +69,43 @@ export class IsoGrid {
   }
 
   /**
-   * Verilen (col, row) karosunun harita sınırları içinde olup olmadığını döndürür.
+   * Verilen tam sayı (col, row) karosunun harita sınırları içinde olup olmadığını döndürür.
    */
   public isInBounds(col: number, row: number): boolean {
     return col >= 0 && col < this.cols && row >= 0 && row < this.rows;
+  }
+
+  /**
+   * Dünya koordinatının (worldX, worldY) 16×16 izometrik elmas harita alanı
+   * içinde kalıp kalmadığını kontrol eder.
+   */
+  public isWorldPointOnMap(worldX: number, worldY: number): boolean {
+    const { col, row } = this.worldToTile(worldX, worldY);
+    return (
+      col >= -0.5 &&
+      col <= this.cols - 0.5 &&
+      row >= -0.5 &&
+      row <= this.rows - 0.5
+    );
+  }
+
+  /**
+   * Sürekli (col, row) koordinatını karakterin harita dışına taşmayacağı
+   * güvenli iç sınırlara sıkıştırır.
+   */
+  public clampContinuousTile(
+    col: number,
+    row: number,
+    margin = 0.28
+  ): { col: number; row: number } {
+    const minC = -0.5 + margin;
+    const maxC = this.cols - 0.5 - margin;
+    const minR = -0.5 + margin;
+    const maxR = this.rows - 0.5 - margin;
+    return {
+      col: Phaser.Math.Clamp(col, minC, maxC),
+      row: Phaser.Math.Clamp(row, minR, maxR),
+    };
   }
 
   /**
@@ -294,13 +327,13 @@ export class IsoGrid {
   }
 
   /**
-   * Verilen (col, row) karosunun sahnedeki (dünya/ekran) tam merkez koordinatını döndürür.
+   * Verilen (col, row; kesirli değerler dahil) karosunun sahnedeki dünya koordinatını döndürür.
    */
   public tileToWorld(col: number, row: number): { x: number; y: number } {
     const local = this.gridToIso(col, row);
     return {
-      x: Math.round(this.mapX + local.x),
-      y: Math.round(this.mapY + local.y),
+      x: this.mapX + local.x,
+      y: this.mapY + local.y,
     };
   }
 

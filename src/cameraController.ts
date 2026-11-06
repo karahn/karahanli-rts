@@ -4,7 +4,7 @@
  * Genişletilmiş 16x16 izometrik haritanın hem masaüstü hem mobil tarayıcılarda
  * tamamının dengeli biçimde görülmesini ve akıcı şekilde gezilebilmesini sağlar:
  * - Ekran boyutuna göre otomatik sığdırma (auto-fit zoom)
- * - Fare sürükleme / tek parmak dokunmatik kaydırma (pan)
+ * - Fare sürükleme / tek parmak dokunmatik kaydırma (tıklama ve sağ tık komutlarıyla çakışmaz)
  * - Fare tekerleği ve iki parmak sıkıştırma (pinch-to-zoom) ile yakınlaştırma
  * - Ok tuşları / WASD ile klavye kaydırma, Home veya R ile merkeze sıfırlama
  */
@@ -20,8 +20,9 @@ export interface MapCameraConfig {
   topUiInset?: number;
 }
 
-const MAX_ZOOM = 1.8;
+const MAX_ZOOM = 1.85;
 const KEYBOARD_PAN_SPEED = 420; // ekran pikseli / saniye
+const DRAG_THRESHOLD_PX = 7; // tıklama/dokunma ile kamera sürüklemeyi ayıran eşik (px)
 
 export class MapCameraController {
   private readonly scene: Phaser.Scene;
@@ -37,8 +38,12 @@ export class MapCameraController {
   private defaultZoom = 1;
   private hasUserAdjustedView = false;
 
-  /** Sürükleme ve iki parmak yakınlaştırma durumu */
+  /** Sürükleme, tıklama ayrımı ve iki parmak yakınlaştırma durumu */
+  private isPointerCandidate = false;
   private isDragging = false;
+  private gestureDragged = false;
+  private downStartX = 0;
+  private downStartY = 0;
   private lastDragX = 0;
   private lastDragY = 0;
   private lastPinchDistance = 0;
@@ -76,6 +81,15 @@ export class MapCameraController {
   }
 
   /**
+   * Son işaretçi (fare/dokunma) etkileşiminin harita sürükleme veya iki parmak
+   * yakınlaştırma olup olmadığını döndürür. Birim seçim/hareket sistemi tıklama ile
+   * kamera kaydırmayı ayırt etmek için bu metodu kullanır.
+   */
+  public wasPointerGestureDragged(): boolean {
+    return this.gestureDragged;
+  }
+
+  /**
    * Ekran boyutu değiştiğinde ölçek sınırlarını günceller.
    * Oyuncu kamerayı elle kaydırmadıysa haritayı yeniden tam ortalar.
    */
@@ -107,14 +121,11 @@ export class MapCameraController {
     const safeWidth = Math.max(width - 40, 220);
     const safeHeight = Math.max(height - this.topUiInset - 28, 180);
 
-    // Ağaç tepeleri ve kenar boşluğu dahil harita sığdırma zarfı
     const fitScaleX = safeWidth / (this.mapWidth + 32);
     const fitScaleY = safeHeight / (this.mapHeight + 36);
     const fullMapFitZoom = Math.min(fitScaleX, fitScaleY);
 
-    // Çok dar dikey telefonlarda bile haritanın tamamını görebilecek kadar uzaklaşmaya izin ver
     this.minZoom = Phaser.Math.Clamp(Math.min(fullMapFitZoom * 0.92, 0.75), 0.3, 0.9);
-    // Başlangıç yakınlaştırması: geniş ekranda ~1.0x, orta/küçük ekranda tüm haritayı sığdırır
     this.defaultZoom = Phaser.Math.Clamp(fullMapFitZoom, 0.5, 1.08);
 
     if (recenter) {
@@ -129,9 +140,6 @@ export class MapCameraController {
     this.applyCameraTransform();
   }
 
-  /**
-   * Üstteki başlık alanını hesaba katarak haritanın görsel merkezini hesaplar.
-   */
   private getCenteredLookY(zoom: number): number {
     return -6 - this.topUiInset / (2 * zoom);
   }
@@ -141,20 +149,55 @@ export class MapCameraController {
 
     input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (this.isTwoFingerGestureActive()) {
+        this.isPointerCandidate = false;
+        this.isDragging = false;
+        this.gestureDragged = true;
+        return;
+      }
+
+      this.gestureDragged = false;
+
+      // Masaüstünde sağ tık birim hareket komutu içindir; kamera sürükleme sol/orta tuş veya dokunma ile yapılır
+      if (!pointer.wasTouch && pointer.button === 2) {
+        this.isPointerCandidate = false;
         this.isDragging = false;
         return;
       }
-      this.isDragging = true;
+
+      this.isPointerCandidate = true;
+      this.isDragging = false;
+      this.downStartX = pointer.x;
+      this.downStartY = pointer.y;
       this.lastDragX = pointer.x;
       this.lastDragY = pointer.y;
     });
 
     input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
       if (this.isTwoFingerGestureActive()) {
+        this.isPointerCandidate = false;
         this.isDragging = false;
+        this.gestureDragged = true;
         return;
       }
-      if (!this.isDragging || !pointer.isDown) {
+
+      if (!this.isPointerCandidate || !pointer.isDown) {
+        return;
+      }
+
+      if (!this.isDragging) {
+        const totalMove = Phaser.Math.Distance.Between(
+          this.downStartX,
+          this.downStartY,
+          pointer.x,
+          pointer.y
+        );
+        if (totalMove < DRAG_THRESHOLD_PX) {
+          return;
+        }
+        this.isDragging = true;
+        this.gestureDragged = true;
+        this.lastDragX = pointer.x;
+        this.lastDragY = pointer.y;
         return;
       }
 
@@ -175,6 +218,7 @@ export class MapCameraController {
 
     const stopDragging = (): void => {
       if (!this.scene.input.activePointer.isDown) {
+        this.isPointerCandidate = false;
         this.isDragging = false;
       }
     };
@@ -182,7 +226,6 @@ export class MapCameraController {
     input.on('pointerup', stopDragging);
     input.on('pointerupoutside', stopDragging);
 
-    // Masaüstü fare tekerleği ile imleç noktasına doğru yakınlaştırma/uzaklaştırma
     input.on(
       'wheel',
       (
@@ -226,6 +269,7 @@ export class MapCameraController {
       return;
     }
 
+    this.gestureDragged = true;
     const dist = Phaser.Math.Distance.Between(p1.x, p1.y, p2.x, p2.y);
     if (dist < 8) {
       return;
@@ -269,9 +313,6 @@ export class MapCameraController {
     this.applyCameraTransform();
   }
 
-  /**
-   * Belirtilen ekran noktasının altındaki dünya koordinatını sabit tutarak yakınlaştırır.
-   */
   private zoomAtScreenPoint(targetZoom: number, screenX: number, screenY: number): void {
     const oldZoom = this.camera.zoom;
     const newZoom = Phaser.Math.Clamp(targetZoom, this.minZoom, MAX_ZOOM);
@@ -297,9 +338,6 @@ export class MapCameraController {
     return Boolean(this.scene.input.pointer1?.isDown && this.scene.input.pointer2?.isDown);
   }
 
-  /**
-   * Kameranın harita sınırlarından tamamen kopmasını önleyerek merkezi günceller.
-   */
   private applyCameraTransform(): void {
     const maxOffsetX = this.mapWidth * 0.52;
     const maxOffsetY = this.mapHeight * 0.56;

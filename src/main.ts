@@ -2,15 +2,16 @@
  * Karahanlı RTS — Ana Giriş Dosyası
  *
  * Phaser 3 + TypeScript + Vite tabanlı 2D gerçek zamanlı strateji oyunu.
- * Genişletilmiş 16x16 dikişsiz izometrik çimen haritayı, doğal koruluk
- * yerleşimindeki 2 kayın + 2 çam odun kaynağını (her biri 100 odun) ve
- * masaüstü/mobil uyumlu kamera ölçekleme-kaydırma sistemini sahnede çalıştırır.
+ * 16x16 dikişsiz izometrik çimen haritayı, doğal koruluk yerleşimindeki
+ * 2 kayın + 2 çam odun kaynağını (her biri 100 odun), ilk Karahanlı köylüsünü,
+ * birim seçim/yürüyüş sistemini ve kamera kontrolcüsünü sahnede çalıştırır.
  */
 
 import Phaser from 'phaser';
 import { MapCameraController } from './cameraController';
 import { ForestSystem } from './forestSystem';
 import { IsoGrid } from './isoGrid';
+import { VillagerSystem } from './villagerSystem';
 
 /** Arayüz (UI) metinleri için en üst derinlik katmanı */
 const UI_DEPTH = 5000;
@@ -21,6 +22,7 @@ const TOP_HUD_INSET = 78;
 class MainScene extends Phaser.Scene {
   private isoGrid?: IsoGrid;
   private forestSystem?: ForestSystem;
+  private villagerSystem?: VillagerSystem;
   private cameraController?: MapCameraController;
   private uiCamera?: Phaser.Cameras.Scene2D.Camera;
   private titleText?: Phaser.GameObjects.Text;
@@ -32,6 +34,7 @@ class MainScene extends Phaser.Scene {
 
   public preload(): void {
     ForestSystem.preload(this);
+    VillagerSystem.preload(this);
   }
 
   public create(): void {
@@ -50,7 +53,24 @@ class MainScene extends Phaser.Scene {
     this.forestSystem = new ForestSystem(this, this.isoGrid);
     this.forestSystem.populate();
 
-    // Sabit üst başlık ve alt bilgi metinleri
+    // 16x16 harita için ekran ölçekleme, sürükleme ve yakınlaştırma kontrolcüsü
+    const mapSize = this.isoGrid.getWorldSize();
+    this.cameraController = new MapCameraController(this, this.cameras.main, {
+      mapWidth: mapSize.width,
+      mapHeight: mapSize.height,
+      topUiInset: TOP_HUD_INSET,
+    });
+
+    // İlk Karahanlı köylüsü, seçim halkası ve engelsiz yürüyüş sistemi
+    this.villagerSystem = new VillagerSystem(
+      this,
+      this.isoGrid,
+      this.forestSystem,
+      this.cameraController
+    );
+    this.villagerSystem.spawnInitialVillager();
+
+    // Sabit üst başlık ve kontrol bilgisi metinleri
     this.titleText = this.add
       .text(0, 0, 'KARAHANLI RTS', {
         fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
@@ -65,7 +85,7 @@ class MainScene extends Phaser.Scene {
       .text(
         0,
         0,
-        '16x16 İzometrik Çimen Harita — Doğal Koruluk (2 Kayın, 2 Çam • Her Ağaç 100 Odun)',
+        'Sol Tık / Dokun: Köylü Seç  •  Sağ Tık / Dokun: Yürüt  •  Sürükle / Tekerlek: Kamera',
         {
           fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
           fontSize: '13px',
@@ -79,19 +99,13 @@ class MainScene extends Phaser.Scene {
     // Arayüz metinlerini yakınlaştırmadan/kaydırmadan bağımsız tutan şeffaf HUD kamerası
     this.uiCamera = this.cameras.add(0, 0, width, height, false, 'HudCamera');
     this.cameras.main.ignore([this.titleText, this.subtitleText]);
+
     const terrainImg = this.isoGrid.getTerrainImage();
     if (terrainImg) {
       this.uiCamera.ignore(terrainImg);
     }
     this.forestSystem.ignoreOnCamera(this.uiCamera);
-
-    // 16x16 harita için ekran ölçekleme, sürükleme ve yakınlaştırma kontrolcüsü
-    const mapSize = this.isoGrid.getWorldSize();
-    this.cameraController = new MapCameraController(this, this.cameras.main, {
-      mapWidth: mapSize.width,
-      mapHeight: mapSize.height,
-      topUiInset: TOP_HUD_INSET,
-    });
+    this.villagerSystem.ignoreOnCamera(this.uiCamera);
 
     this.layoutHud(width);
     this.scale.on('resize', this.handleResize, this);
@@ -100,6 +114,7 @@ class MainScene extends Phaser.Scene {
 
   public update(_time: number, delta: number): void {
     this.cameraController?.update(delta);
+    this.villagerSystem?.update(delta);
   }
 
   private layoutHud(width: number): void {
@@ -121,6 +136,7 @@ class MainScene extends Phaser.Scene {
 
   private cleanup(): void {
     this.scale.off('resize', this.handleResize, this);
+    this.villagerSystem?.destroy();
     this.cameraController?.destroy();
     this.forestSystem?.destroy();
     this.isoGrid?.destroy();
