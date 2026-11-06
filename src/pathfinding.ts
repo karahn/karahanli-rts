@@ -17,11 +17,11 @@ export interface GridObstacleQuery {
   isTileBlocked: (col: number, row: number) => boolean;
 }
 
-/** Ağaç gövdesi merkezinden korunacak minimum ızgara yarıçapı (köşe kesmeyi önler: 0.707 < 0.74 < 1.0) */
-const OBSTACLE_CLEARANCE_RADIUS = 0.74;
+/** Büyütülmüş ağaç kök/gövde çapına göre güncellenen minimum engel mesafesi (0.707 < 0.78 < 1.0) */
+const OBSTACLE_CLEARANCE_RADIUS = 0.78;
 
 /** Harita dış kenarından korunacak güvenli iç pay (karo birimi) */
-const MAP_BORDER_MARGIN = 0.28;
+const MAP_BORDER_MARGIN = 0.24;
 
 interface AStarNode {
   col: number;

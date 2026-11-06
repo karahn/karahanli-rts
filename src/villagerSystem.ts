@@ -191,6 +191,8 @@ export class VillagerSystem {
 
   public destroy(): void {
     this.scene.input.off('pointerup', this.handlePointerUp, this);
+    this.scene.input.off('pointermove', this.handlePointerHover, this);
+    this.scene.input.setDefaultCursor('default');
     this.moveMarkerTween?.stop();
     this.moveMarker.destroy();
     for (const unit of this.villagers.values()) {
@@ -205,6 +207,16 @@ export class VillagerSystem {
     // Sağ tık tarayıcı menüsünü devre dışı bırak (masaüstü sağ tık yürüyüş komutu için)
     this.scene.input.mouse?.disableContextMenu();
     this.scene.input.on('pointerup', this.handlePointerUp, this);
+    this.scene.input.on('pointermove', this.handlePointerHover, this);
+  }
+
+  private handlePointerHover(pointer: Phaser.Input.Pointer): void {
+    if (pointer.wasTouch || pointer.isDown) {
+      return;
+    }
+    const worldPt = this.scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    const hovered = this.pickTopmostVillagerAt(worldPt.x, worldPt.y, false);
+    this.scene.input.setDefaultCursor(hovered ? 'pointer' : 'default');
   }
 
   private handlePointerUp(pointer: Phaser.Input.Pointer): void {
@@ -281,8 +293,8 @@ export class VillagerSystem {
 
   private drawMoveMarkerGraphic(): void {
     this.moveMarker.clear();
-    this.moveMarker.lineStyle(1.5, 0x4ade80, 0.9);
-    this.moveMarker.strokeEllipse(0, 0, 22, 11);
+    this.moveMarker.lineStyle(1.3, 0x4ade80, 0.9);
+    this.moveMarker.strokeEllipse(0, 0, 18, 9);
   }
 
   private playMoveFeedback(worldX: number, worldY: number): void {

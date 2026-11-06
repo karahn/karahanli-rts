@@ -20,11 +20,17 @@ const ANIM_WALK_FRONT = 'karahanli_villager_walk_front';
 const ANIM_WALK_BACK = 'karahanli_villager_walk_back';
 
 const ORIGIN_X = 48 / VILLAGER_FRAME_WIDTH;
-const ORIGIN_Y = 110 / VILLAGER_FRAME_HEIGHT;
-const DEFAULT_SCALE = 0.46;
+/** Her iki çizme tabanının çimen yüzeyine tam bastığı dikey referans noktası */
+const ORIGIN_Y = 108 / VILLAGER_FRAME_HEIGHT;
 
-/** Saniyede katedilen ızgara karosu birimi cinsinden doğal yürüyüş hızı */
-const DEFAULT_MOVE_SPEED = 2.35;
+/** Ağaçlarla (kayın ~0.54, çam ~0.60) gerçekçi orantıda köylü görsel ölçeği (~34 dünya px boy) */
+const DEFAULT_SCALE = 0.37;
+
+/** Yeni ölçekteki adım açıklığıyla kayma olmadan örtüşen doğal yürüyüş hızı (karo/sn) */
+const DEFAULT_MOVE_SPEED = 1.95;
+
+/** Temel yürüyüş animasyonu kare hızı (FPS) */
+const BASE_WALK_FPS = 8.5;
 
 export type VillagerState = 'idle' | 'walking';
 
@@ -41,6 +47,7 @@ export class Villager {
   private readonly isoGrid: IsoGrid;
   private readonly sprite: Phaser.GameObjects.Sprite;
   private readonly selectionRing: Phaser.GameObjects.Graphics;
+  private readonly unitScale: number;
 
   private gridPos: GridCoord;
   private worldPos: { x: number; y: number };
@@ -58,10 +65,9 @@ export class Villager {
     this.gridPos = { col: config.col, row: config.row };
     this.worldPos = isoGrid.tileToWorld(config.col, config.row);
     this.moveSpeed = config.moveSpeed ?? DEFAULT_MOVE_SPEED;
+    this.unitScale = config.scale ?? DEFAULT_SCALE;
 
-    const unitScale = config.scale ?? DEFAULT_SCALE;
-
-    // Seçildiğinde ayaklarının altında beliren ince yeşil izometrik seçim halkası
+    // Seçildiğinde ayaklarının altında beliren, yeni ölçeğe uyumlu ince yeşil seçim halkası
     this.selectionRing = scene.add.graphics();
     this.drawSelectionRing();
     this.selectionRing.setVisible(false);
@@ -69,7 +75,7 @@ export class Villager {
     // Tarihî Karahanlı köylü sprite'ı
     this.sprite = scene.add.sprite(this.worldPos.x, this.worldPos.y, VILLAGER_TEXTURE_KEY, 0);
     this.sprite.setOrigin(ORIGIN_X, ORIGIN_Y);
-    this.sprite.setScale(unitScale);
+    this.sprite.setScale(this.unitScale);
 
     this.syncVisualTransform();
   }
@@ -94,7 +100,7 @@ export class Villager {
         frames: scene.anims.generateFrameNumbers(VILLAGER_TEXTURE_KEY, {
           frames: [1, 2, 3, 0],
         }),
-        frameRate: 8,
+        frameRate: BASE_WALK_FPS,
         repeat: -1,
       });
     }
@@ -105,7 +111,7 @@ export class Villager {
         frames: scene.anims.generateFrameNumbers(VILLAGER_TEXTURE_KEY, {
           frames: [5, 6, 7, 4],
         }),
-        frameRate: 8,
+        frameRate: BASE_WALK_FPS,
         repeat: -1,
       });
     }
@@ -147,9 +153,10 @@ export class Villager {
     return this.moveSpeed;
   }
 
-  /** Köylünün hareket hızını (karo/sn) günceller. */
+  /** Köylünün hareket hızını (karo/sn) günceller ve adım temposunu senkronize eder. */
   public setMoveSpeed(speedTilesPerSec: number): void {
     this.moveSpeed = Math.max(0.2, speedTilesPerSec);
+    this.sprite.anims.timeScale = this.moveSpeed / DEFAULT_MOVE_SPEED;
   }
 
   /** Mevcut durumunu ('idle' | 'walking') döndürür. */
@@ -240,22 +247,26 @@ export class Villager {
   /**
    * Dünya koordinatındaki (worldX, worldY) bir tıklama/dokunmanın bu köylünün
    * gövdesi üzerine denk gelip gelmediğini kontrol eder.
+   * Küçültülmüş gerçekçi görsel boyuta rağmen hem fare hem dokunmatik ekranda
+   * rahat seçilebilmesi için ergonomik seçim payı içerir.
    */
   public containsWorldPoint(
     worldX: number,
     worldY: number,
     isTouch = false
   ): boolean {
-    const pad = isTouch ? 11 : 4;
-    const halfWidth = 13 + pad;
-    const headHeight = 42 + pad;
-    const footDepth = 8 + pad;
+    const visualHalfW = Math.round(18 * this.unitScale); // ~7 px
+    const visualHeight = Math.round(92 * this.unitScale); // ~34 px
+
+    const padX = isTouch ? 14 : 7;
+    const padTop = isTouch ? 12 : 6;
+    const padBottom = isTouch ? 10 : 6;
 
     return (
-      worldX >= this.worldPos.x - halfWidth &&
-      worldX <= this.worldPos.x + halfWidth &&
-      worldY >= this.worldPos.y - headHeight &&
-      worldY <= this.worldPos.y + footDepth
+      worldX >= this.worldPos.x - (visualHalfW + padX) &&
+      worldX <= this.worldPos.x + (visualHalfW + padX) &&
+      worldY >= this.worldPos.y - (visualHeight + padTop) &&
+      worldY <= this.worldPos.y + padBottom
     );
   }
 
@@ -300,6 +311,7 @@ export class Villager {
     }
 
     this.sprite.setFlipX(this.facingLeft);
+    this.sprite.anims.timeScale = this.moveSpeed / DEFAULT_MOVE_SPEED;
 
     const desiredAnim = this.facingBack ? ANIM_WALK_BACK : ANIM_WALK_FRONT;
     if (this.sprite.anims.currentAnim?.key !== desiredAnim || !this.sprite.anims.isPlaying) {
@@ -309,10 +321,13 @@ export class Villager {
 
   private drawSelectionRing(): void {
     this.selectionRing.clear();
-    // İnce yeşil izometrik seçim halkası (2:1 elips oranı)
-    this.selectionRing.fillStyle(0x22c55e, 0.14);
-    this.selectionRing.fillEllipse(0, 0, 28, 14);
-    this.selectionRing.lineStyle(1.6, 0x4ade80, 0.95);
-    this.selectionRing.strokeEllipse(0, 0, 28, 14);
+    // Yeni köylü ölçeğine uyumlu ince yeşil izometrik seçim halkası (0.37 ölçekte 22x11 px)
+    const ringW = Math.max(18, Math.round(60 * this.unitScale));
+    const ringH = Math.max(9, Math.round(30 * this.unitScale));
+
+    this.selectionRing.fillStyle(0x22c55e, 0.15);
+    this.selectionRing.fillEllipse(0, 0, ringW, ringH);
+    this.selectionRing.lineStyle(1.4, 0x4ade80, 0.95);
+    this.selectionRing.strokeEllipse(0, 0, ringW, ringH);
   }
 }

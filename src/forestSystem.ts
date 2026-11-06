@@ -32,14 +32,14 @@ const TREE_SPECS: Record<TreeType, TreeVisualSpec> = {
     assetPath: 'assets/sprites/steppe_tree.png',
     originX: 111 / 230,
     originY: 182 / 202,
-    defaultScale: 0.49,
+    defaultScale: 0.54,
   },
   cam: {
     textureKey: 'tree_cam',
     assetPath: 'assets/sprites/pine_tree.png',
     originX: 65 / 129,
     originY: 207 / 228,
-    defaultScale: 0.49,
+    defaultScale: 0.6,
   },
 };
 
@@ -71,10 +71,10 @@ export interface TreeResourceNode {
  * - Haritanın geniş orta, doğu ve güney düzlükleri (col 6..15, row 3..15) tamamen açıktır
  */
 export const INITIAL_FOREST_LAYOUT: readonly TreeSpawnConfig[] = [
-  { id: 'wood_cam_1', treeType: 'cam', col: 4, row: 4, scale: 0.5 },
-  { id: 'wood_kayin_1', treeType: 'kayin', col: 2, row: 6, scale: 0.5 },
-  { id: 'wood_cam_2', treeType: 'cam', col: 5, row: 7, scale: 0.47 },
-  { id: 'wood_kayin_2', treeType: 'kayin', col: 3, row: 9, scale: 0.48 },
+  { id: 'wood_cam_1', treeType: 'cam', col: 4, row: 4, scale: 0.62 },
+  { id: 'wood_kayin_1', treeType: 'kayin', col: 2, row: 6, scale: 0.55 },
+  { id: 'wood_cam_2', treeType: 'cam', col: 5, row: 7, scale: 0.59 },
+  { id: 'wood_kayin_2', treeType: 'kayin', col: 3, row: 9, scale: 0.53 },
 ];
 
 export class ForestSystem {
