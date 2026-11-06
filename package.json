@@ -1,0 +1,20 @@
+{
+  "name": "karahanli-rts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Karahanlı RTS — Phaser 3 ve TypeScript tabanlı 2D Gerçek Zamanlı Strateji Oyunu",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "phaser": "^3.88.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}
