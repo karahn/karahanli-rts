@@ -15,6 +15,7 @@
 
 import Phaser from 'phaser';
 import { TownHallHudSnapshot } from './townHall';
+import { BarracksHudSnapshot } from './barracks';
 import { UnitCategory } from './unitTypes';
 import { VillagerHudStatus } from './villagerSystem';
 
@@ -28,18 +29,25 @@ const VILLAGER_PORTRAIT_KEYS = [
   'portrait_villager_3',
 ] as const;
 
+const WARRIOR_PORTRAIT_KEY = 'portrait_warrior_1';
 const TOWN_HALL_PORTRAIT_KEY = 'portrait_town_hall';
+const BARRACKS_PORTRAIT_KEY = 'portrait_barracks';
 
 export interface BottomPanelCallbacks {
   onToggleTouchBoxMode: () => void;
   onSelectAllUnits: () => void;
   onSelectTownHall: () => void;
+  onSelectBarracks: () => void;
   onClearSelection: () => void;
   onSelectSingleUnit: (unitId: string) => void;
   onCommandSelectedEnterTownHall: () => void;
+  onCommandSelectedEnterBarracks?: () => void;
   onTrainVillager: () => boolean;
+  onTrainWarrior: () => boolean;
   onEjectSingleUnit: (unitId?: string) => void;
   onEjectAllUnits: () => void;
+  onEjectSingleFromBarracks?: (unitId?: string) => void;
+  onEjectAllFromBarracks?: () => void;
 }
 
 interface ClickableZone {
@@ -238,7 +246,9 @@ export class BottomInfoPanel {
     scene.load.image(VILLAGER_PORTRAIT_KEYS[0], 'assets/portraits/villager_1.png');
     scene.load.image(VILLAGER_PORTRAIT_KEYS[1], 'assets/portraits/villager_2.png');
     scene.load.image(VILLAGER_PORTRAIT_KEYS[2], 'assets/portraits/villager_3.png');
+    scene.load.image(WARRIOR_PORTRAIT_KEY, 'assets/portraits/warrior_1.png');
     scene.load.image(TOWN_HALL_PORTRAIT_KEY, 'assets/portraits/town_hall.png');
+    scene.load.image(BARRACKS_PORTRAIT_KEY, 'assets/portraits/barracks.png');
   }
 
   public getGameObjects(): Phaser.GameObjects.GameObject[] {
@@ -283,16 +293,11 @@ export class BottomInfoPanel {
     screenHeight: number,
     unitStatus: VillagerHudStatus,
     townHallSnap: TownHallHudSnapshot,
+    barracksSnap: BarracksHudSnapshot | null = null,
     force = false
   ): void {
     const warnFlash = this.scene.time.now < this.warnFlashUntil;
-    const sig = this.buildSignature(
-      screenWidth,
-      screenHeight,
-      unitStatus,
-      townHallSnap,
-      warnFlash
-    );
+    const sig = this.buildSignature(screenWidth, screenHeight, unitStatus, townHallSnap, warnFlash, barracksSnap);
 
     if (!force && sig === this.lastRenderSignature) {
       return;
@@ -338,7 +343,18 @@ export class BottomInfoPanel {
     );
 
     // 3) Seçim moduna göre içerik düzeni
-    if (townHallSnap.selected) {
+    if (barracksSnap && barracksSnap.selected) {
+      this.renderBarracksMode(
+        panelX,
+        panelY,
+        panelW,
+        panelH,
+        unitStatus,
+        barracksSnap,
+        warnFlash,
+        isCompact
+      );
+    } else if (townHallSnap.selected) {
       this.renderTownHallMode(
         panelX,
         panelY,
@@ -406,6 +422,7 @@ export class BottomInfoPanel {
   ): void {
     const anySelected = unitStatus.selectedCount > 0 || townHallSnap.selected;
 
+    const totalFieldUnits = (unitStatus as any).fieldUnitsCount ?? unitStatus.fieldVillagersCount;
     const items: Array<{
       label: string;
       active: boolean;
@@ -419,11 +436,9 @@ export class BottomInfoPanel {
         action: () => this.callbacks.onToggleTouchBoxMode(),
       },
       {
-        label: `Tümünü Seç (${unitStatus.fieldVillagersCount})`,
-        active:
-          unitStatus.fieldVillagersCount > 0 &&
-          unitStatus.selectedCount === unitStatus.fieldVillagersCount,
-        dim: unitStatus.fieldVillagersCount === 0,
+        label: `Tümünü Seç (${totalFieldUnits})`,
+        active: totalFieldUnits > 0 && unitStatus.selectedCount === totalFieldUnits,
+        dim: totalFieldUnits === 0,
         action: () => this.callbacks.onSelectAllUnits(),
       },
       {
@@ -433,10 +448,13 @@ export class BottomInfoPanel {
         action: () => this.callbacks.onSelectTownHall(),
       },
       {
-        label:
-          unitStatus.selectedCount > 0
-            ? `Bırak (${unitStatus.selectedCount})`
-            : 'Bırak',
+        label: 'Kışla',
+        active: false,
+        dim: false,
+        action: () => (this.callbacks as any).onSelectBarracks?.(),
+      },
+      {
+        label: unitStatus.selectedCount > 0 ? `Bırak (${unitStatus.selectedCount})` : 'Bırak',
         active: false,
         dim: !anySelected,
         action: () => this.callbacks.onClearSelection(),
@@ -954,6 +972,123 @@ export class BottomInfoPanel {
     );
   }
 
+  private renderBarracksMode(
+    px: number,
+    py: number,
+    pw: number,
+    ph: number,
+    unitStatus: VillagerHudStatus,
+    snap: BarracksHudSnapshot,
+    warnFlash: boolean,
+    isCompact: boolean
+  ): void {
+    const iconX = px + 12;
+    const iconY = py + 12;
+    const iconSize = isCompact ? 46 : 54;
+    this.drawBarracksPortraitCard(this.mainPortraitImage, iconX, iconY, iconSize, snap.hp, snap.maxHp);
+
+    const leftTextX = iconX + iconSize + 10;
+    const dividerX = px + Math.round(pw * (isCompact ? 0.5 : 0.48));
+    this.rootBg.lineStyle(1, 0x334155, 0.85);
+    this.rootBg.lineBetween(dividerX, py + 10, dividerX, py + ph - 10);
+
+    this.headerTitle.setFontSize(isCompact ? 12 : 13.5);
+    this.headerTitle.setText(isCompact ? `${snap.buildingName} (${snap.buildingSubtitle})` : `${snap.buildingName} — ${snap.buildingSubtitle}`);
+    this.headerTitle.setPosition(leftTextX, py + 9);
+    this.headerTitle.setVisible(true);
+
+    this.headerSubtitle.setFontSize(isCompact ? 10 : 11);
+    this.headerSubtitle.setText(`Askerî Yapı  •  Can: ${snap.hp}/${snap.maxHp}`);
+    this.headerSubtitle.setPosition(leftTextX, py + 26);
+    this.headerSubtitle.setVisible(true);
+
+    let prodNote: string;
+    if (snap.queueLength > 0) {
+      prodNote = `Üretiliyor: ${snap.activeRemainingSec.toFixed(1)} sn` + (snap.queueLength > 1 ? ` (Sıra: ${snap.queueLength})` : '');
+      this.col1Text.setColor('#7dd3fc');
+    } else {
+      prodNote = `Hazır Birimler: ${(unitStatus as any).totalWarriorsCount ?? 0} Kılıçlı Asker  •  Ücretsiz (test)`;
+      this.col1Text.setColor('#cbd5e1');
+    }
+    this.col1Text.setFontSize(isCompact ? 10 : 10.5);
+    this.col1Text.setText(prodNote);
+    this.col1Text.setPosition(leftTextX, py + 43);
+    this.col1Text.setVisible(true);
+
+    const trainBtnX = px + 12;
+    const trainBtnW = dividerX - px - 22;
+    const trainBtnY = py + ph - 40;
+    if (snap.queueLength > 0) {
+      const barY = trainBtnY - 10;
+      this.rootBg.fillStyle(0x1e293b, 0.95);
+      this.rootBg.fillRoundedRect(trainBtnX, barY, trainBtnW, 6, 3);
+      if (snap.activeProgressRatio > 0.01) {
+        this.rootBg.fillStyle(0x38bdf8, 0.95);
+        this.rootBg.fillRoundedRect(trainBtnX, barY, Math.max(4, trainBtnW * snap.activeProgressRatio), 6, 3);
+      }
+    }
+
+    const trainLabel = snap.canTrainWarrior ? `+ Kılıçlı Asker Üret (5 sn)` : snap.queueLength >= 5 ? 'Üretim Sırası Dolu' : `+ Kılıçlı Asker Üret (5 sn)`;
+    this.drawActionButton(trainBtnX, trainBtnY, trainBtnW, 31, trainLabel, this.primaryBtnText, snap.canTrainWarrior, warnFlash, 0x1e3a8a, 0x38bdf8, () => {
+      const ok = (this.callbacks as any).onTrainWarrior ? (this.callbacks as any).onTrainWarrior() : false;
+      if (!ok) { this.warnFlashUntil = this.scene.time.now + 650; this.lastRenderSignature = ''; }
+    });
+
+    // Sağ bölüm: Garnizon (Kışla içindeki savaşçılar)
+    const garX = dividerX + 12;
+    const garW = px + pw - garX - 12;
+    const gar = snap.garrison;
+    const catSummaryParts: string[] = [];
+    if (gar.countsByCategory.warrior > 0) catSummaryParts.push(`Savaşçı ×${gar.countsByCategory.warrior}`);
+    if (gar.countsByCategory.villager > 0) catSummaryParts.push(`Köylü ×${gar.countsByCategory.villager}`);
+    if (gar.countsByCategory.commander > 0) catSummaryParts.push(`Komutan ×${gar.countsByCategory.commander}`);
+    const catDetail = catSummaryParts.length > 0 ? ` (${catSummaryParts.join(', ')})` : ' — Boş';
+    this.col3TitleText.setFontSize(isCompact ? 11 : 12);
+    this.col3TitleText.setText(`İçerideki Birimler: ${gar.totalCount}${isCompact ? '' : catDetail}`);
+    this.col3TitleText.setPosition(garX, py + 9);
+    this.col3TitleText.setVisible(true);
+
+    const slotSize = isCompact ? 34 : 38;
+    const slotGap = 5;
+    const maxSlots = Math.max(3, Math.min(MAX_ICON_SLOTS, Math.floor((garW + slotGap) / (slotSize + slotGap))));
+    const totalPages = Math.max(1, Math.ceil(gar.units.length / maxSlots));
+    this.garrisonPage = Phaser.Math.Clamp(this.garrisonPage, 0, totalPages - 1);
+
+    if (gar.totalCount === 0) {
+      this.col2Text.setFontSize(isCompact ? 10 : 10.5);
+      this.col2Text.setColor('#94a3b8');
+      this.col2Text.setText('İçeride birim yok. Seçili askerlerle Kışla\'ya sağ tıklayarak garnizona alabilirsiniz.');
+      this.col2Text.setPosition(garX, py + 31);
+      this.col2Text.setVisible(true);
+    } else {
+      const startIdx = this.garrisonPage * maxSlots;
+      const visible = gar.units.slice(startIdx, startIdx + maxSlots);
+      const slotY = py + 28;
+      for (let i = 0; i < visible.length; i += 1) {
+        const gu = visible[i];
+        const sx = garX + i * (slotSize + slotGap);
+        this.drawUnitPortraitCard(this.slotPortraitImages[i], sx, slotY, slotSize, gu.id, gu.category, gu.hp, gu.maxHp, false);
+        const numMatch = /\d+$/.exec(gu.id);
+        const tag = this.slotTexts[i];
+        tag.setText(numMatch ? `#${numMatch[0]}` : gu.displayName.slice(0, 3));
+        tag.setPosition(sx + slotSize * 0.5, slotY + slotSize - 5);
+        tag.setVisible(true);
+        this.clickableZones.push({ rect: new Phaser.Geom.Rectangle(sx, slotY, slotSize, slotSize + 5), onClick: () => (this.callbacks as any).onEjectSingleFromBarracks?.(gu.id) });
+      }
+      if (totalPages > 1) {
+        this.renderPaginationButtons(px + pw - 14, py + 8, this.garrisonPage, totalPages, (delta) => {
+          this.garrisonPage = Phaser.Math.Clamp(this.garrisonPage + delta, 0, totalPages - 1);
+          this.lastRenderSignature = '';
+        });
+      }
+    }
+    const hasGarrison = gar.totalCount > 0;
+    const ejectBtnY = py + ph - 40;
+    const halfBtnW = Math.floor((garW - 8) * 0.5);
+    this.drawActionButton(garX, ejectBtnY, halfBtnW, 31, 'Tek Çıkar', this.secondaryBtnText, hasGarrison, false, 0x334155, 0x94a3b8, () => { if (hasGarrison) (this.callbacks as any).onEjectSingleFromBarracks?.(); });
+    this.drawActionButton(garX + halfBtnW + 8, ejectBtnY, garW - halfBtnW - 8, 31, hasGarrison ? `Tümünü Çıkar (${gar.totalCount})` : 'Tümünü Çıkar', this.tertiaryBtnText, hasGarrison, false, 0x78350f, 0xf59e0b, () => { if (hasGarrison) (this.callbacks as any).onEjectAllFromBarracks?.(); });
+  }
+
   private renderIdleSettlementMode(
     px: number,
     py: number,
@@ -1111,8 +1246,12 @@ export class BottomInfoPanel {
       img.setPosition(x + 1, y + 1);
       img.setDisplaySize(size - 2, size - 2);
       img.setVisible(true);
+    } else if (category === 'warrior') {
+      img.setTexture(WARRIOR_PORTRAIT_KEY);
+      img.setPosition(x + 1, y + 1);
+      img.setDisplaySize(size - 2, size - 2);
+      img.setVisible(true);
     } else {
-      // Gelecekteki savaşçı / komutan birimleri için rozet altlığı
       img.setVisible(false);
       const bgTone = category === 'commander' ? 0x3b1d1d : 0x1e293b;
       g.fillStyle(bgTone, 0.96);
@@ -1168,6 +1307,21 @@ export class BottomInfoPanel {
     g.fillRect(x + 4, y + size - 5, Math.max(2, (size - 8) * ratio), 3.5);
   }
 
+  private drawBarracksPortraitCard(img: Phaser.GameObjects.Image, x: number, y: number, size: number, hp: number, maxHp: number): void {
+    img.setTexture(BARRACKS_PORTRAIT_KEY);
+    img.setPosition(x + 1, y + 1);
+    img.setDisplaySize(size - 2, size - 2);
+    img.setVisible(true);
+    const g = this.iconOverlayGraphics;
+    g.lineStyle(1.6, 0x38bdf8, 0.96);
+    g.strokeRect(x, y, size, size);
+    const ratio = maxHp > 0 ? Phaser.Math.Clamp(hp / maxHp, 0, 1) : 1;
+    g.fillStyle(0x020617, 0.92);
+    g.fillRect(x + 3, y + size - 6, size - 6, 5);
+    g.fillStyle(0x38bdf8, 1);
+    g.fillRect(x + 4, y + size - 5, Math.max(2, (size - 8) * ratio), 3.5);
+  }
+
   private resolveVillagerPortraitKey(unitId: string): string {
     const match = /\d+$/.exec(unitId);
     if (match) {
@@ -1205,7 +1359,8 @@ export class BottomInfoPanel {
     h: number,
     u: VillagerHudStatus,
     th: TownHallHudSnapshot,
-    warn: boolean
+    warn: boolean,
+    barracksSnap?: BarracksHudSnapshot | null
   ): string {
     const su = u.selectedUnit;
     const mu = u.multiSelected;
@@ -1229,6 +1384,8 @@ export class BottomInfoPanel {
       this.multiPage,
       this.garrisonPage,
       warn ? 1 : 0,
+      barracksSnap ? barracksSnap.queueLength : 0,
+      barracksSnap ? Math.round(barracksSnap.activeProgressRatio * 50) : 0,
       su
         ? `${su.id}:${su.hp}:${su.carriedResource.amount}:${su.taskDescription}`
         : '-',
