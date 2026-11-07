@@ -14,6 +14,7 @@ import {
   BOTTOM_DOCK_TOTAL_HEIGHT,
   BottomInfoPanel,
 } from './bottomInfoPanel';
+import { Barracks } from './barracks';
 import { MapCameraController } from './cameraController';
 import { ForestSystem } from './forestSystem';
 import { IsoGrid } from './isoGrid';
@@ -30,6 +31,7 @@ class MainScene extends Phaser.Scene {
   private forestSystem?: ForestSystem;
   private woodDepot?: WoodDepot;
   private townHall?: TownHall;
+  private barracks?: Barracks;
   private villagerSystem?: VillagerSystem;
   private cameraController?: MapCameraController;
   private bottomPanel?: BottomInfoPanel;
@@ -50,6 +52,7 @@ class MainScene extends Phaser.Scene {
     ForestSystem.preload(this);
     WoodDepot.preload(this);
     TownHall.preload(this);
+    Barracks.preload(this);
     VillagerSystem.preload(this);
     BottomInfoPanel.preload(this);
   }
@@ -76,6 +79,9 @@ class MainScene extends Phaser.Scene {
     // Kurt armalı Eski Türk Hükümdar Konağı — Town Hall (cols: 9..11, rows: 5..7)
     this.townHall = new TownHall(this, this.isoGrid, this.woodDepot);
 
+    // Ahşap karkaslı, taş temelli Karahanlı Kışlası — 3x2 askerî yapı (cols: 6..8, rows: 10..11)
+    this.barracks = new Barracks(this, this.isoGrid);
+
     // Kamera kontrolcüsü (üst kaynak çubuğu ve alt bilgi paneli boşluklarıyla dengeli)
     const mapSize = this.isoGrid.getWorldSize();
     this.cameraController = new MapCameraController(this, this.cameras.main, {
@@ -94,6 +100,9 @@ class MainScene extends Phaser.Scene {
       this.townHall,
       this.cameraController
     );
+    if (this.barracks) {
+      this.villagerSystem.setBarracks(this.barracks);
+    }
     this.villagerSystem.spawnInitialVillagers();
 
     // Age of Empires & Celtic Kings tarzı yakın plan portreli alt bilgi ve yönetim paneli
@@ -109,6 +118,10 @@ class MainScene extends Phaser.Scene {
       },
       onSelectTownHall: () => {
         this.villagerSystem?.selectTownHall();
+        this.refreshHud(true);
+      },
+      onSelectBarracks: () => {
+        this.villagerSystem?.selectBarracks();
         this.refreshHud(true);
       },
       onClearSelection: () => {
@@ -201,6 +214,7 @@ class MainScene extends Phaser.Scene {
     this.forestSystem.ignoreOnCamera(this.uiCamera);
     this.woodDepot.ignoreOnCamera(this.uiCamera);
     this.townHall.ignoreOnCamera(this.uiCamera);
+    this.barracks?.ignoreOnCamera(this.uiCamera);
     this.villagerSystem.ignoreOnCamera(this.uiCamera);
 
     this.layoutTopHud(width);
@@ -228,6 +242,7 @@ class MainScene extends Phaser.Scene {
 
     const unitStatus = this.villagerSystem.getHudStatus();
     const thSnap = this.townHall.getHudSnapshot();
+    const barracksSnap = this.barracks ? this.barracks.getHudSnapshot() : null;
 
     // Garnizondaki birim sayısı üst şeritte gösterilmez; yalnızca Town Hall seçildiğinde alt panelde yer alır
     const topLine =
@@ -246,6 +261,7 @@ class MainScene extends Phaser.Scene {
       this.scale.height,
       unitStatus,
       thSnap,
+      barracksSnap,
       force
     );
   }
@@ -299,6 +315,7 @@ class MainScene extends Phaser.Scene {
     this.bottomPanel?.destroy();
     this.villagerSystem?.destroy();
     this.townHall?.destroy();
+    this.barracks?.destroy();
     this.woodDepot?.destroy();
     this.cameraController?.destroy();
     this.forestSystem?.destroy();

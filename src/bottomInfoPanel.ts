@@ -14,6 +14,7 @@
  */
 
 import Phaser from 'phaser';
+import { BarracksHudSnapshot } from './barracks';
 import { TownHallHudSnapshot } from './townHall';
 import { UnitCategory } from './unitTypes';
 import { VillagerHudStatus } from './villagerSystem';
@@ -29,11 +30,13 @@ const VILLAGER_PORTRAIT_KEYS = [
 ] as const;
 
 const TOWN_HALL_PORTRAIT_KEY = 'portrait_town_hall';
+const BARRACKS_PORTRAIT_KEY = 'portrait_barracks';
 
 export interface BottomPanelCallbacks {
   onToggleTouchBoxMode: () => void;
   onSelectAllUnits: () => void;
   onSelectTownHall: () => void;
+  onSelectBarracks: () => void;
   onClearSelection: () => void;
   onSelectSingleUnit: (unitId: string) => void;
   onCommandSelectedEnterTownHall: () => void;
@@ -110,7 +113,7 @@ export class BottomInfoPanel {
     const fontStack =
       'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < 5; i += 1) {
       this.quickLabels.push(
         scene.add
           .text(0, 0, '', {
@@ -239,6 +242,7 @@ export class BottomInfoPanel {
     scene.load.image(VILLAGER_PORTRAIT_KEYS[1], 'assets/portraits/villager_2.png');
     scene.load.image(VILLAGER_PORTRAIT_KEYS[2], 'assets/portraits/villager_3.png');
     scene.load.image(TOWN_HALL_PORTRAIT_KEY, 'assets/portraits/town_hall.png');
+    scene.load.image(BARRACKS_PORTRAIT_KEY, 'assets/portraits/barracks.png');
   }
 
   public getGameObjects(): Phaser.GameObjects.GameObject[] {
@@ -283,6 +287,7 @@ export class BottomInfoPanel {
     screenHeight: number,
     unitStatus: VillagerHudStatus,
     townHallSnap: TownHallHudSnapshot,
+    barracksSnap: BarracksHudSnapshot | null = null,
     force = false
   ): void {
     const warnFlash = this.scene.time.now < this.warnFlashUntil;
@@ -291,6 +296,7 @@ export class BottomInfoPanel {
       screenHeight,
       unitStatus,
       townHallSnap,
+      barracksSnap,
       warnFlash
     );
 
@@ -320,6 +326,7 @@ export class BottomInfoPanel {
       panelY - 31,
       unitStatus,
       townHallSnap,
+      barracksSnap,
       isCompact
     );
 
@@ -338,7 +345,17 @@ export class BottomInfoPanel {
     );
 
     // 3) Seçim moduna göre içerik düzeni
-    if (townHallSnap.selected) {
+    if (barracksSnap?.selected) {
+      this.renderBarracksMode(
+        panelX,
+        panelY,
+        panelW,
+        panelH,
+        barracksSnap,
+        warnFlash,
+        isCompact
+      );
+    } else if (townHallSnap.selected) {
       this.renderTownHallMode(
         panelX,
         panelY,
@@ -402,9 +419,13 @@ export class BottomInfoPanel {
     topY: number,
     unitStatus: VillagerHudStatus,
     townHallSnap: TownHallHudSnapshot,
+    barracksSnap: BarracksHudSnapshot | null,
     isCompact: boolean
   ): void {
-    const anySelected = unitStatus.selectedCount > 0 || townHallSnap.selected;
+    const anySelected =
+      unitStatus.selectedCount > 0 ||
+      townHallSnap.selected ||
+      (barracksSnap?.selected ?? false);
 
     const items: Array<{
       label: string;
@@ -431,6 +452,12 @@ export class BottomInfoPanel {
         active: townHallSnap.selected,
         dim: false,
         action: () => this.callbacks.onSelectTownHall(),
+      },
+      {
+        label: 'Kışla',
+        active: barracksSnap?.selected ?? false,
+        dim: !barracksSnap,
+        action: () => this.callbacks.onSelectBarracks(),
       },
       {
         label:
@@ -954,6 +981,117 @@ export class BottomInfoPanel {
     );
   }
 
+  /**
+   * Karahanlı Kışlası seçildiğinde gösterilen bina bilgi paneli:
+   * yakın plan kışla portresi, bina adı, alt başlığı ve can değeri.
+   */
+  private renderBarracksMode(
+    px: number,
+    py: number,
+    pw: number,
+    ph: number,
+    snap: BarracksHudSnapshot,
+    warnFlash: boolean,
+    isCompact: boolean
+  ): void {
+    // SOL BÖLÜM: Kışla yakın plan portresi + bina adı + can bilgisi
+    const iconX = px + 12;
+    const iconY = py + 12;
+    const iconSize = isCompact ? 46 : 54;
+    this.drawBarracksPortraitCard(
+      this.mainPortraitImage,
+      iconX,
+      iconY,
+      iconSize,
+      snap.hp,
+      snap.maxHp
+    );
+
+    const leftTextX = iconX + iconSize + 10;
+    const dividerX = px + Math.round(pw * (isCompact ? 0.5 : 0.48));
+
+    this.rootBg.lineStyle(1, 0x334155, 0.85);
+    this.rootBg.lineBetween(dividerX, py + 10, dividerX, py + ph - 10);
+
+    this.headerTitle.setFontSize(isCompact ? 12 : 13.5);
+    this.headerTitle.setText(
+      isCompact
+        ? `${snap.buildingName} (${snap.buildingSubtitle})`
+        : `${snap.buildingName} — ${snap.buildingSubtitle}`
+    );
+    this.headerTitle.setPosition(leftTextX, py + 9);
+    this.headerTitle.setVisible(true);
+
+    const hpRatio = snap.maxHp > 0 ? snap.hp / snap.maxHp : 1;
+    this.headerSubtitle.setFontSize(isCompact ? 10 : 11);
+    this.headerSubtitle.setText(
+      `Yapı Sağlığı: ${snap.hp}/${snap.maxHp}  •  Dayanıklılık: %${Math.round(
+        hpRatio * 100
+      )}`
+    );
+    this.headerSubtitle.setPosition(leftTextX, py + 26);
+    this.headerSubtitle.setVisible(true);
+
+    this.col1Text.setFontSize(isCompact ? 10 : 10.5);
+    this.col1Text.setColor('#cbd5e1');
+    this.col1Text.setText(
+      'Ahşap karkas ve kaba yontulmuş taş temel üzerine kurulu 3x2 karo\n' +
+        'askerî yapı. Asker üretimi ve savaş sistemi geliştirme aşamasında.'
+    );
+    this.col1Text.setPosition(leftTextX, py + 43);
+    this.col1Text.setVisible(true);
+
+    // SAĞ BÖLÜM: Kışla bilgileri + geçiş butonları
+    const infoX = dividerX + 12;
+    const infoW = px + pw - infoX - 12;
+
+    this.col3TitleText.setFontSize(isCompact ? 11 : 12);
+    this.col3TitleText.setText('Kışla Bilgileri');
+    this.col3TitleText.setPosition(infoX, py + 9);
+    this.col3TitleText.setVisible(true);
+
+    this.col2Text.setFontSize(isCompact ? 10 : 10.5);
+    this.col2Text.setColor('#94a3b8');
+    this.col2Text.setText(
+      'Tahkimat : Ahşap karkas + taş temel\n' +
+        'Garnizon : Yok (yakında)\n' +
+        'Üretim    : Yok (yakında)'
+    );
+    this.col2Text.setPosition(infoX, py + 28);
+    this.col2Text.setVisible(true);
+
+    const btnY = py + ph - 40;
+    const halfBtnW = Math.floor((infoW - 8) * 0.5);
+
+    this.drawActionButton(
+      infoX,
+      btnY,
+      halfBtnW,
+      31,
+      'Town Hall Aç',
+      this.primaryBtnText,
+      true,
+      warnFlash,
+      0x78350f,
+      0xf59e0b,
+      () => this.callbacks.onSelectTownHall()
+    );
+
+    this.drawActionButton(
+      infoX + halfBtnW + 8,
+      btnY,
+      infoW - halfBtnW - 8,
+      31,
+      'Seçimi Bırak',
+      this.secondaryBtnText,
+      true,
+      false,
+      0x334155,
+      0x94a3b8,
+      () => this.callbacks.onClearSelection()
+    );
+  }
+
   private renderIdleSettlementMode(
     px: number,
     py: number,
@@ -994,13 +1132,14 @@ export class BottomInfoPanel {
     this.col1Text.setVisible(true);
 
     if (!isCompact) {
-      const btnW = 148;
-      const btnX = px + pw - btnW - 14;
+      const btnW = 122;
+      const btnH = 36;
+      const btnY = py + Math.round((ph - btnH) * 0.5);
       this.drawActionButton(
-        btnX,
-        py + Math.round((ph - 36) * 0.5),
+        px + pw - btnW * 2 - 22,
+        btnY,
         btnW,
-        36,
+        btnH,
         'Town Hall Aç',
         this.primaryBtnText,
         true,
@@ -1008,6 +1147,19 @@ export class BottomInfoPanel {
         0x78350f,
         0xf59e0b,
         () => this.callbacks.onSelectTownHall()
+      );
+      this.drawActionButton(
+        px + pw - btnW - 14,
+        btnY,
+        btnW,
+        btnH,
+        'Kışla Aç',
+        this.secondaryBtnText,
+        true,
+        false,
+        0x334155,
+        0x94a3b8,
+        () => this.callbacks.onSelectBarracks()
       );
     }
   }
@@ -1168,6 +1320,33 @@ export class BottomInfoPanel {
     g.fillRect(x + 4, y + size - 5, Math.max(2, (size - 8) * ratio), 3.5);
   }
 
+  /**
+   * Ahşap ve taş mimarili Karahanlı Kışlası yakın plan portre kartını çizer.
+   */
+  private drawBarracksPortraitCard(
+    img: Phaser.GameObjects.Image,
+    x: number,
+    y: number,
+    size: number,
+    hp: number,
+    maxHp: number
+  ): void {
+    img.setTexture(BARRACKS_PORTRAIT_KEY);
+    img.setPosition(x + 1, y + 1);
+    img.setDisplaySize(size - 2, size - 2);
+    img.setVisible(true);
+
+    const g = this.iconOverlayGraphics;
+    g.lineStyle(1.6, 0xb45309, 0.96);
+    g.strokeRect(x, y, size, size);
+
+    const ratio = maxHp > 0 ? Phaser.Math.Clamp(hp / maxHp, 0, 1) : 1;
+    g.fillStyle(0x020617, 0.92);
+    g.fillRect(x + 3, y + size - 6, size - 6, 5);
+    g.fillStyle(0x22c55e, 1);
+    g.fillRect(x + 4, y + size - 5, Math.max(2, (size - 8) * ratio), 3.5);
+  }
+
   private resolveVillagerPortraitKey(unitId: string): string {
     const match = /\d+$/.exec(unitId);
     if (match) {
@@ -1205,6 +1384,7 @@ export class BottomInfoPanel {
     h: number,
     u: VillagerHudStatus,
     th: TownHallHudSnapshot,
+    ba: BarracksHudSnapshot | null,
     warn: boolean
   ): string {
     const su = u.selectedUnit;
@@ -1221,6 +1401,7 @@ export class BottomInfoPanel {
       u.selectedCount,
       u.touchBoxSelectMode ? 1 : 0,
       th.selected ? 1 : 0,
+      ba?.selected ? 1 : 0,
       th.canTrainVillager ? 1 : 0,
       th.queueLength,
       progBucket,

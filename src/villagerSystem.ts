@@ -27,6 +27,7 @@ import {
   GridCoord,
   GridObstacleQuery,
 } from './pathfinding';
+import { Barracks } from './barracks';
 import { TRAIN_VILLAGER_TASK_ID, TownHall } from './townHall';
 import {
   CarriedResourceSummary,
@@ -131,6 +132,7 @@ export class VillagerSystem {
   private readonly forestSystem: ForestSystem;
   private readonly woodDepot: WoodDepot;
   private readonly townHall: TownHall;
+  private barracks?: Barracks;
   private readonly cameraController: MapCameraController;
   private readonly worldContext: VillagerWorldContext;
 
@@ -239,6 +241,24 @@ export class VillagerSystem {
     this.garrisonBuildings.set(building.id, building);
   }
 
+  /**
+   * Kışlayı sisteme bağlar. Kışla birim hareketinde engel teşkil eder ve
+   * tıklanınca seçilebilir; bu aşamada garnizon/üretim içermez.
+   */
+  public setBarracks(barracks: Barracks): void {
+    this.barracks = barracks;
+  }
+
+  public hasBarracks(): boolean {
+    return this.barracks !== undefined;
+  }
+
+  /** Town Hall ve Kışla seçimini birlikte kaldırır. */
+  private deselectBuildings(): void {
+    this.townHall.setSelected(false);
+    this.barracks?.setSelected(false);
+  }
+
   public setUiHitBlocker(
     predicate: (screenX: number, screenY: number) => boolean
   ): void {
@@ -252,7 +272,7 @@ export class VillagerSystem {
   public setTouchBoxSelectMode(enabled: boolean): void {
     this.touchBoxSelectMode = enabled;
     if (enabled) {
-      this.townHall.setSelected(false);
+      this.deselectBuildings();
     }
     if (!enabled && this.isMarqueeDragging) {
       this.cancelMarqueeDrag();
@@ -508,7 +528,7 @@ export class VillagerSystem {
     if (!unit || unit.isGarrisoned()) {
       return;
     }
-    this.townHall.setSelected(false);
+    this.deselectBuildings();
     this.selectedVillagerIds.clear();
     this.selectedVillagerIds.add(id);
     this.syncSelectionRings();
@@ -525,7 +545,7 @@ export class VillagerSystem {
       }
     }
     if (this.selectedVillagerIds.size > 0) {
-      this.townHall.setSelected(false);
+      this.deselectBuildings();
     }
     this.syncSelectionRings();
   }
@@ -538,7 +558,7 @@ export class VillagerSystem {
     if (this.selectedVillagerIds.has(id)) {
       this.selectedVillagerIds.delete(id);
     } else {
-      this.townHall.setSelected(false);
+      this.deselectBuildings();
       this.selectedVillagerIds.add(id);
     }
     this.syncSelectionRings();
@@ -548,7 +568,7 @@ export class VillagerSystem {
    * Haritada dışarıda bulunan tüm köylüleri seçer (bina içindekiler hariç).
    */
   public selectAllVillagers(): void {
-    this.townHall.setSelected(false);
+    this.deselectBuildings();
     this.selectedVillagerIds.clear();
     for (const [id, unit] of this.villagers.entries()) {
       if (!unit.isGarrisoned()) {
@@ -558,16 +578,30 @@ export class VillagerSystem {
     this.syncSelectionRings();
   }
 
+  /** Kışlayı seçer; köylü ve Town Hall seçimini temizler. */
+  public selectBarracks(): void {
+    if (!this.barracks) {
+      return;
+    }
+    this.touchBoxSelectMode = false;
+    this.selectedVillagerIds.clear();
+    this.syncSelectionRings();
+    this.townHall.setSelected(false);
+    this.barracks.setSelected(true);
+    this.barracks.playPulse();
+  }
+
   public selectTownHall(): void {
     this.touchBoxSelectMode = false;
     this.selectedVillagerIds.clear();
     this.syncSelectionRings();
+    this.barracks?.setSelected(false);
     this.townHall.setSelected(true);
   }
 
   public clearSelection(): void {
     this.selectedVillagerIds.clear();
-    this.townHall.setSelected(false);
+    this.deselectBuildings();
     this.syncSelectionRings();
   }
 
@@ -1042,7 +1076,8 @@ export class VillagerSystem {
         const blocked =
           this.forestSystem.getTreeAt(c, r) !== undefined ||
           this.woodDepot.occupiesTile(c, r) ||
-          this.townHall.occupiesTile(c, r);
+          this.townHall.occupiesTile(c, r) ||
+          (this.barracks?.occupiesTile(c, r) ?? false);
         if (blocked && Math.hypot(col - c, row - r) < 0.76) {
           return false;
         }
@@ -1202,7 +1237,8 @@ export class VillagerSystem {
         !this.isoGrid.isInBounds(col, row) ||
         this.forestSystem.getTreeAt(col, row) !== undefined ||
         this.woodDepot.occupiesTile(col, row) ||
-        this.townHall.occupiesTile(col, row),
+        this.townHall.occupiesTile(col, row) ||
+        (this.barracks?.occupiesTile(col, row) ?? false),
     };
   }
 
@@ -1452,6 +1488,8 @@ export class VillagerSystem {
       worldPt.y,
       isTouch
     );
+    const hitBarracks =
+      this.barracks?.containsWorldPoint(worldPt.x, worldPt.y, isTouch) ?? false;
     const now = this.scene.time.now;
     const activeSelectedCount = this.getSelectedCount();
 
@@ -1490,6 +1528,13 @@ export class VillagerSystem {
         return;
       }
 
+      // Kışlada henüz garnizon/üretim yok: birim seçili değilken kışla panelini açar,
+      // birim seçiliyken akış aşağıdaki hareket komutuna düşer (birimler yanına yürür)
+      if (hitBarracks && activeSelectedCount === 0) {
+        this.selectBarracks();
+        return;
+      }
+
       if (activeSelectedCount > 0) {
         const hitTree = this.forestSystem.pickTreeAtWorld(
           worldPt.x,
@@ -1512,7 +1557,7 @@ export class VillagerSystem {
           this.clearSelection();
         }
       } else if (this.townHall.isSelected()) {
-        this.townHall.setSelected(false);
+        this.deselectBuildings();
       }
       return;
     }
@@ -1543,6 +1588,8 @@ export class VillagerSystem {
           this.lastTappedVillagerId = hitVillager.id;
           this.lastVillagerTapTime = now;
         }
+      } else if (hitBarracks && !shiftHeld) {
+        this.selectBarracks();
       } else if (hitTownHall && !shiftHeld) {
         this.selectTownHall();
       } else if (!shiftHeld) {
@@ -1621,7 +1668,7 @@ export class VillagerSystem {
       this.selectedVillagerIds.add(id);
     }
     if (this.selectedVillagerIds.size > 0) {
-      this.townHall.setSelected(false);
+      this.deselectBuildings();
     }
     this.syncSelectionRings();
   }
