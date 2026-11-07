@@ -31,12 +31,14 @@ const VILLAGER_PORTRAIT_KEYS = [
 
 const TOWN_HALL_PORTRAIT_KEY = 'portrait_town_hall';
 const BARRACKS_PORTRAIT_KEY = 'portrait_barracks';
+const WARRIOR_PORTRAIT_KEY = 'portrait_warrior_1';
 
 export interface BottomPanelCallbacks {
   onToggleTouchBoxMode: () => void;
   onSelectAllUnits: () => void;
   onSelectTownHall: () => void;
   onSelectBarracks: () => void;
+  onTrainWarrior: () => boolean;
   onClearSelection: () => void;
   onSelectSingleUnit: (unitId: string) => void;
   onCommandSelectedEnterTownHall: () => void;
@@ -243,6 +245,7 @@ export class BottomInfoPanel {
     scene.load.image(VILLAGER_PORTRAIT_KEYS[2], 'assets/portraits/villager_3.png');
     scene.load.image(TOWN_HALL_PORTRAIT_KEY, 'assets/portraits/town_hall.png');
     scene.load.image(BARRACKS_PORTRAIT_KEY, 'assets/portraits/barracks.png');
+    scene.load.image(WARRIOR_PORTRAIT_KEY, 'assets/portraits/warrior_1.png');
   }
 
   public getGameObjects(): Phaser.GameObjects.GameObject[] {
@@ -563,9 +566,11 @@ export class BottomInfoPanel {
 
     const combatNote = unit.combatSystemActive ? '' : ' (yakında)';
     const carryLine =
-      unit.carriedResource.amount > 0
-        ? `${unit.carriedResource.resourceLabel} ${unit.carriedResource.amount}/${unit.carriedResource.maxCapacity}`
-        : `Yok (0/${unit.carriedResource.maxCapacity} ${unit.carriedResource.resourceLabel})`;
+      unit.carriedResource.maxCapacity <= 0
+        ? 'Yok (kaynak toplamaz)'
+        : unit.carriedResource.amount > 0
+          ? `${unit.carriedResource.resourceLabel} ${unit.carriedResource.amount}/${unit.carriedResource.maxCapacity}`
+          : `Yok (0/${unit.carriedResource.maxCapacity} ${unit.carriedResource.resourceLabel})`;
 
     if (isCompact) {
       this.col1Text.setFontSize(10.5);
@@ -603,19 +608,29 @@ export class BottomInfoPanel {
     }
 
     // Sağ tarafta "Town Hall'a Gir" hızlı aksiyon butonu
+    // (Kılıçlı askerler için garnizon sistemi henüz yok — buton devre dışı)
+    const canGarrison = unit.category === 'villager';
     const btnY = py + Math.round((ph - 38) * 0.5);
     this.drawActionButton(
       rightBtnX,
       btnY,
       rightBtnW,
       38,
-      isCompact ? "Konak'a Gir" : "Town Hall'a Gir",
+      canGarrison
+        ? isCompact
+          ? "Konak'a Gir"
+          : "Town Hall'a Gir"
+        : 'Garnizon (yakında)',
       this.primaryBtnText,
-      true,
+      canGarrison,
       false,
       0x1e3a5f,
       0x60a5fa,
-      () => this.callbacks.onCommandSelectedEnterTownHall()
+      () => {
+        if (canGarrison) {
+          this.callbacks.onCommandSelectedEnterTownHall();
+        }
+      }
     );
   }
 
@@ -994,7 +1009,7 @@ export class BottomInfoPanel {
     warnFlash: boolean,
     isCompact: boolean
   ): void {
-    // SOL BÖLÜM: Kışla yakın plan portresi + bina adı + can bilgisi
+    // SOL BÖLÜM: Kışla portresi + bina adı + can bilgisi + Kılıçlı Asker üretimi
     const iconX = px + 12;
     const iconY = py + 12;
     const iconSize = isCompact ? 46 : 54;
@@ -1032,14 +1047,69 @@ export class BottomInfoPanel {
     this.headerSubtitle.setPosition(leftTextX, py + 26);
     this.headerSubtitle.setVisible(true);
 
-    this.col1Text.setFontSize(isCompact ? 10 : 10.5);
-    this.col1Text.setColor('#cbd5e1');
-    this.col1Text.setText(
-      'Ahşap karkas ve kaba yontulmuş taş temel üzerine kurulu 3x2 karo\n' +
-        'askerî yapı. Asker üretimi ve savaş sistemi geliştirme aşamasında.'
-    );
+    if (snap.queueLength > 0) {
+      this.col1Text.setFontSize(isCompact ? 10 : 10.5);
+      this.col1Text.setColor('#86efac');
+      this.col1Text.setText(
+        `Üretiliyor: ${snap.activeRemainingSec.toFixed(1)} sn` +
+          (snap.queueLength > 1 ? ` (Sıra: ${snap.queueLength})` : '')
+      );
+    } else if (!snap.canTrainWarrior) {
+      this.col1Text.setFontSize(isCompact ? 10 : 10.5);
+      this.col1Text.setColor(warnFlash ? '#fca5a5' : '#94a3b8');
+      this.col1Text.setText('Üretim sırası dolu');
+    } else {
+      this.col1Text.setFontSize(isCompact ? 10 : 10.5);
+      this.col1Text.setColor('#cbd5e1');
+      this.col1Text.setText('Açık avlulu talim alanı hazır');
+    }
     this.col1Text.setPosition(leftTextX, py + 43);
     this.col1Text.setVisible(true);
+
+    const trainBtnX = px + 12;
+    const trainBtnW = dividerX - px - 22;
+    const trainBtnY = py + ph - 40;
+
+    if (snap.queueLength > 0) {
+      const barY = trainBtnY - 10;
+      this.rootBg.fillStyle(0x1e293b, 0.95);
+      this.rootBg.fillRoundedRect(trainBtnX, barY, trainBtnW, 6, 3);
+      if (snap.activeProgressRatio > 0.01) {
+        this.rootBg.fillStyle(0x4ade80, 0.95);
+        this.rootBg.fillRoundedRect(
+          trainBtnX,
+          barY,
+          Math.max(4, trainBtnW * snap.activeProgressRatio),
+          6,
+          3
+        );
+      }
+    }
+
+    const costLabel = snap.warriorWoodCost > 0 ? `${snap.warriorWoodCost} Odun` : 'Ücretsiz';
+    const trainLabel = snap.canTrainWarrior
+      ? `+ Kılıçlı Asker Üret (${costLabel} • ${snap.warriorDurationSec} sn)`
+      : 'Üretim Sırası Dolu';
+
+    this.drawActionButton(
+      trainBtnX,
+      trainBtnY,
+      trainBtnW,
+      31,
+      trainLabel,
+      this.primaryBtnText,
+      snap.canTrainWarrior,
+      warnFlash,
+      0x166534,
+      0x4ade80,
+      () => {
+        const ok = this.callbacks.onTrainWarrior();
+        if (!ok) {
+          this.warnFlashUntil = this.scene.time.now + 650;
+          this.lastRenderSignature = '';
+        }
+      }
+    );
 
     // SAĞ BÖLÜM: Kışla bilgileri + geçiş butonları
     const infoX = dividerX + 12;
@@ -1054,8 +1124,8 @@ export class BottomInfoPanel {
     this.col2Text.setColor('#94a3b8');
     this.col2Text.setText(
       'Tahkimat : Ahşap karkas + taş temel\n' +
-        'Garnizon : Yok (yakında)\n' +
-        'Üretim    : Yok (yakında)'
+        'Avlu       : Açık talim alanı\n' +
+        `Üretim    : Kılıçlı Asker (${snap.warriorDurationSec} sn, ${costLabel})`
     );
     this.col2Text.setPosition(infoX, py + 28);
     this.col2Text.setVisible(true);
@@ -1069,9 +1139,9 @@ export class BottomInfoPanel {
       halfBtnW,
       31,
       'Town Hall Aç',
-      this.primaryBtnText,
+      this.secondaryBtnText,
       true,
-      warnFlash,
+      false,
       0x78350f,
       0xf59e0b,
       () => this.callbacks.onSelectTownHall()
@@ -1083,7 +1153,7 @@ export class BottomInfoPanel {
       infoW - halfBtnW - 8,
       31,
       'Seçimi Bırak',
-      this.secondaryBtnText,
+      this.tertiaryBtnText,
       true,
       false,
       0x334155,
@@ -1263,6 +1333,11 @@ export class BottomInfoPanel {
       img.setPosition(x + 1, y + 1);
       img.setDisplaySize(size - 2, size - 2);
       img.setVisible(true);
+    } else if (category === 'warrior') {
+      img.setTexture(WARRIOR_PORTRAIT_KEY);
+      img.setPosition(x + 1, y + 1);
+      img.setDisplaySize(size - 2, size - 2);
+      img.setVisible(true);
     } else {
       // Gelecekteki savaşçı / komutan birimleri için rozet altlığı
       img.setVisible(false);
@@ -1402,6 +1477,10 @@ export class BottomInfoPanel {
       u.touchBoxSelectMode ? 1 : 0,
       th.selected ? 1 : 0,
       ba?.selected ? 1 : 0,
+      ba?.canTrainWarrior ? 1 : 0,
+      ba?.queueLength ?? 0,
+      Math.round((ba?.activeProgressRatio ?? 0) * 50),
+      Math.ceil((ba?.activeRemainingSec ?? 0) * 10),
       th.canTrainVillager ? 1 : 0,
       th.queueLength,
       progBucket,

@@ -102,6 +102,10 @@ class MainScene extends Phaser.Scene {
     );
     if (this.barracks) {
       this.villagerSystem.setBarracks(this.barracks);
+      this.barracks.onTaskCompleted(() => {
+        this.villagerSystem?.spawnWarriorFromBarracks();
+        this.refreshHud(true);
+      });
     }
     this.villagerSystem.spawnInitialVillagers();
 
@@ -113,7 +117,7 @@ class MainScene extends Phaser.Scene {
       },
       onSelectAllUnits: () => {
         this.villagerSystem?.setTouchBoxSelectMode(false);
-        this.villagerSystem?.selectAllVillagers();
+        this.villagerSystem?.selectAllUnits();
         this.refreshHud(true);
       },
       onSelectTownHall: () => {
@@ -124,13 +128,18 @@ class MainScene extends Phaser.Scene {
         this.villagerSystem?.selectBarracks();
         this.refreshHud(true);
       },
+      onTrainWarrior: () => {
+        const res = this.barracks?.tryTrainWarrior();
+        this.refreshHud(true);
+        return Boolean(res?.ok);
+      },
       onClearSelection: () => {
         this.villagerSystem?.setTouchBoxSelectMode(false);
         this.villagerSystem?.clearSelection();
         this.refreshHud(true);
       },
       onSelectSingleUnit: (unitId) => {
-        this.villagerSystem?.selectSingleVillager(unitId);
+        this.villagerSystem?.selectSingleUnit(unitId);
         this.refreshHud(true);
       },
       onCommandSelectedEnterTownHall: () => {
@@ -221,11 +230,13 @@ class MainScene extends Phaser.Scene {
     this.refreshHud(true);
     this.scale.on('resize', this.handleResize, this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.cleanup, this);
+
   }
 
   public update(_time: number, delta: number): void {
     this.cameraController?.update(delta);
     this.townHall?.update(delta, this.provisionWallet);
+    this.barracks?.update(delta);
     this.villagerSystem?.update(delta);
     this.refreshHud(false);
   }
@@ -245,9 +256,11 @@ class MainScene extends Phaser.Scene {
     const barracksSnap = this.barracks ? this.barracks.getHudSnapshot() : null;
 
     // Garnizondaki birim sayısı üst şeritte gösterilmez; yalnızca Town Hall seçildiğinde alt panelde yer alır
+    const totalWarriors = unitStatus.totalWarriorsCount;
     const topLine =
       `Toplam Odun: ${unitStatus.totalStoredWood}   •   ` +
       `Nüfus: ${unitStatus.totalVillagersCount} Köylü   •   ` +
+      `Asker: ${totalWarriors}   •   ` +
       `Orman: ${unitStatus.remainingTreesCount} Ağaç`;
 
     if (force || topLine !== this.lastTopResourceLine) {

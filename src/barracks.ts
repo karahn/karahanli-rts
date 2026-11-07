@@ -1,16 +1,17 @@
 /**
- * Karahanlı RTS — Karahanlı Kışlası (Askerî Yapı)
+ * Karahanlı RTS — Karahanlı Kışlası (Askerî Eğitim Yapısı)
  *
- * Karahanlı yerleşiminin güneybatısında, Hükümdar Konağı'nın batısında yer alan,
- * kızıl tuğla ve kaba yontulmuş taş temel üzerine kerpiç dolgulu ahşap karkasla
- * inşa edilmiş, kirpi saçaklı ahşap kiremit çatılı ve tunç kurt totemli büyük
- * kemerli kapısı bulunan 3x2 karoluk askerî kışla:
- * - Town Hall ile aynı izometrik izdüşüm, ölçek ve çizim kalitesindedir
- * - Haritaya doğal yerleşim düzeninde (koruluğun güneyi, konağın batısı) konumlanır
- * - Seçildiğinde alt bilgi panelinde bina adı, alt başlığı ve can değeri gösterilir
- * - Birimler için engel teşkil eder; köylüler çevresinden dolaşarak geçer
- *
- * NOT: Bu aşamada asker üretimi ve savaş sistemi bulunmamaktadır.
+ * Yerleşimin güneybatısında (cols 6..8, rows 10..11) yer alan, ZEMİNE DOĞRUDAN
+ * OTURAN açık avlulu askerî talim yapısı:
+ * - Kaba yontulmuş taş ve ahşap karkas duvarlarla çevrili, ortası açık toprak
+ *   avlu/talim alanı olan alçak ve geniş bir yapıdır
+ * - Town Hall'daki gibi büyük yükseltilmiş taş platform KULLANMAZ; yalnızca
+ *   girişte küçük bir taş eşik bulunur
+ * - Town Hall ile aynı çizim kalitesinde ama ondan daha alçak ve daha az
+ *   baskındır (görünür yükseklik ~88 px'e karşı ~126 px)
+ * - Seçildiğinde alt bilgi panelinde bina adı, can değeri ve Kılıçlı Asker
+ *   üretim butonu gösterilir
+ * - Üretilen asker kışlanın ön cephesinde (güneyde) ortaya çıkar
  */
 
 import Phaser from 'phaser';
@@ -21,20 +22,26 @@ export const BARRACKS_TEXTURE_KEY = 'barracks_karahanli';
 export const BARRACKS_ASSET_PATH = 'assets/sprites/barracks_karahanli.png';
 
 const TEX_WIDTH = 322;
-const TEX_HEIGHT = 251;
+const TEX_HEIGHT = 177;
 /**
  * Dokunun izometrik taban elmasının merkezine karşılık gelen orijin.
- * Town Hall dokusunda kullanılan yöntemin aynısıyla, taban elmasının
- * alt-sol / alt-sağ kenarları ölçülerek hesaplanmıştır.
+ * Town Hall dokusunda kullanılan yöntemin aynısıyla (taban elmasının alt
+ * kenarları ölçülerek) hesaplandı — Town Hall'da sapma 0.8 px.
  */
-const ORIGIN_X = 0.50155;
-const ORIGIN_Y = 0.66534;
+const ORIGIN_X = 0.5;
+const ORIGIN_Y = 0.56497;
 /** 2x retina dokuyu dünya uzayında tam 3x2 karo elmasına oturtan ölçek */
-const DISPLAY_SCALE = 0.5;
+const DISPLAY_SCALE = 0.49844;
 
 /** 3x2 karo ayak izinin dünya uzayındaki elmas yarı genişliği / yarı yüksekliği */
 const FOOTPRINT_HALF_WIDTH = 80;
-const FOOTPRINT_HALF_HEIGHT = 41.5;
+const FOOTPRINT_HALF_HEIGHT = 37.88;
+
+/** Kılıçlı asker üretim süresi (ms) ve maliyeti (test aşamasında ücretsiz) */
+export const WARRIOR_PRODUCTION_DURATION_MS = 5000;
+export const WARRIOR_PRODUCTION_WOOD_COST = 0;
+export const TRAIN_WARRIOR_TASK_ID = 'train_warrior';
+const MAX_PRODUCTION_QUEUE = 5;
 
 export interface BarracksConfig {
   id?: string;
@@ -52,6 +59,19 @@ export interface BarracksHudSnapshot {
   selected: boolean;
   hp: number;
   maxHp: number;
+  canTrainWarrior: boolean;
+  warriorWoodCost: number;
+  warriorDurationSec: number;
+  queueLength: number;
+  activeProgressRatio: number;
+  activeRemainingSec: number;
+}
+
+export type BarracksTaskCompletedCallback = (taskId: string) => void;
+
+export interface EnqueueTaskResult {
+  ok: boolean;
+  reason?: 'queue_full';
 }
 
 /** Koruluğun güneyinde, Hükümdar Konağı'nın batısında kalan açık askerî meydan */
@@ -82,8 +102,12 @@ export class Barracks {
   private readonly shadowGraphics: Phaser.GameObjects.Graphics;
   private readonly selectionGraphics: Phaser.GameObjects.Graphics;
   private readonly sprite: Phaser.GameObjects.Image;
+  private readonly progressGraphics: Phaser.GameObjects.Graphics;
 
   private selected = false;
+  private productionElapsedMs: number | null = null;
+  private queueLength = 0;
+  private readonly completionListeners = new Set<BarracksTaskCompletedCallback>();
   private pulseTween?: Phaser.Tweens.Tween;
 
   constructor(
@@ -127,6 +151,11 @@ export class Barracks {
     this.sprite.setOrigin(ORIGIN_X, ORIGIN_Y);
     this.sprite.setScale(DISPLAY_SCALE);
     this.sprite.setDepth(sortDepth);
+
+    this.progressGraphics = scene.add.graphics();
+    this.progressGraphics.setPosition(worldPos.x, worldPos.y - 74);
+    this.progressGraphics.setDepth(sortDepth + 120);
+    this.progressGraphics.setVisible(false);
   }
 
   public static preload(scene: Phaser.Scene): void {
@@ -176,7 +205,7 @@ export class Barracks {
     const dx = worldX - center.x;
     const dy = worldY - center.y;
 
-    // 1) 3x2 izometrik taş temel kaide elması
+    // 1) 3x2 izometrik taban elması (zemine oturan avlu alanı)
     const diamondHit =
       Math.abs(dx) / (FOOTPRINT_HALF_WIDTH + 2 + pad) +
         Math.abs(dy - 2) / (FOOTPRINT_HALF_HEIGHT + 1 + pad) <=
@@ -185,12 +214,12 @@ export class Barracks {
       return true;
     }
 
-    // 2) Ahşap karkas gövde ve kirpi saçaklı kiremit çatı
-    return Math.abs(dx) <= 62 + pad && dy >= -78 - pad && dy <= 22 + pad;
+    // 2) Alçak avlu duvarları ve ahşap sundurma çatıları
+    return Math.abs(dx) <= 66 + pad && dy >= -50 - pad && dy <= 14 + pad;
   }
 
   /**
-   * İleride üretilecek birimlerin çıkış noktaları — kışlanın ön cephesi (güney).
+   * Üretilen askerlerin çıkış noktaları — kışlanın ön cephesi (güney).
    */
   public getSpawnCandidateSpots(): GridCoord[] {
     const cMid = this.originCol + (this.footprintCols - 1) * 0.5;
@@ -207,7 +236,79 @@ export class Barracks {
     ];
   }
 
+  // --- Kılıçlı Asker üretimi ---
+
+  public canTrainWarrior(): boolean {
+    return this.queueLength < MAX_PRODUCTION_QUEUE;
+  }
+
+  public tryTrainWarrior(): EnqueueTaskResult {
+    if (!this.canTrainWarrior()) {
+      return { ok: false, reason: 'queue_full' };
+    }
+
+    if (this.queueLength === 0) {
+      this.productionElapsedMs = 0;
+    }
+    this.queueLength += 1;
+    this.playPulse();
+    this.refreshWorldProgressBar();
+    return { ok: true };
+  }
+
+  public onTaskCompleted(listener: BarracksTaskCompletedCallback): void {
+    this.completionListeners.add(listener);
+  }
+
+  public update(deltaMs: number): void {
+    if (this.queueLength === 0 || this.productionElapsedMs === null) {
+      if (this.progressGraphics.visible) {
+        this.progressGraphics.setVisible(false);
+      }
+      return;
+    }
+
+    this.productionElapsedMs += deltaMs;
+
+    if (this.productionElapsedMs >= WARRIOR_PRODUCTION_DURATION_MS) {
+      const carryOverMs = Math.min(
+        100,
+        this.productionElapsedMs - WARRIOR_PRODUCTION_DURATION_MS
+      );
+      this.queueLength = Math.max(0, this.queueLength - 1);
+
+      if (this.queueLength > 0) {
+        this.productionElapsedMs = carryOverMs;
+      } else {
+        this.productionElapsedMs = null;
+      }
+
+      this.playPulse();
+      for (const listener of this.completionListeners) {
+        listener(TRAIN_WARRIOR_TASK_ID);
+      }
+    }
+
+    this.refreshWorldProgressBar();
+  }
+
   public getHudSnapshot(): BarracksHudSnapshot {
+    const ratio =
+      this.productionElapsedMs === null
+        ? 0
+        : Phaser.Math.Clamp(
+            this.productionElapsedMs / WARRIOR_PRODUCTION_DURATION_MS,
+            0,
+            1
+          );
+    const remainingSec =
+      this.productionElapsedMs === null
+        ? 0
+        : Math.max(
+            0,
+            (WARRIOR_PRODUCTION_DURATION_MS - this.productionElapsedMs) / 1000
+          );
+
     return {
       id: this.id,
       buildingName: this.buildingName,
@@ -215,10 +316,16 @@ export class Barracks {
       selected: this.selected,
       hp: this.hp,
       maxHp: this.maxHp,
+      canTrainWarrior: this.canTrainWarrior(),
+      warriorWoodCost: WARRIOR_PRODUCTION_WOOD_COST,
+      warriorDurationSec: WARRIOR_PRODUCTION_DURATION_MS / 1000,
+      queueLength: this.queueLength,
+      activeProgressRatio: ratio,
+      activeRemainingSec: remainingSec,
     };
   }
 
-  /** Seçim/puanlama geri bildirimi için hafif ölçek darbesi. */
+  /** Seçim/üretim geri bildirimi için hafif ölçek darbesi. */
   public playPulse(): void {
     this.pulseTween?.stop();
     this.sprite.setScale(DISPLAY_SCALE);
@@ -243,14 +350,54 @@ export class Barracks {
       this.shadowGraphics,
       this.selectionGraphics,
       this.sprite,
+      this.progressGraphics,
     ]);
   }
 
   public destroy(): void {
     this.pulseTween?.stop();
+    this.completionListeners.clear();
     this.shadowGraphics.destroy();
     this.selectionGraphics.destroy();
     this.sprite.destroy();
+    this.progressGraphics.destroy();
+  }
+
+  private refreshWorldProgressBar(): void {
+    if (this.queueLength === 0 || this.productionElapsedMs === null) {
+      this.progressGraphics.clear();
+      this.progressGraphics.setVisible(false);
+      return;
+    }
+
+    const ratio = Phaser.Math.Clamp(
+      this.productionElapsedMs / WARRIOR_PRODUCTION_DURATION_MS,
+      0,
+      1
+    );
+
+    const barW = 58;
+    const barH = 6;
+    const x = -barW * 0.5;
+
+    this.progressGraphics.clear();
+    this.progressGraphics.fillStyle(0x0f172a, 0.88);
+    this.progressGraphics.fillRoundedRect(x - 2, -2, barW + 4, barH + 4, 4);
+    this.progressGraphics.lineStyle(1, 0x94a3b8, 0.8);
+    this.progressGraphics.strokeRoundedRect(x - 2, -2, barW + 4, barH + 4, 4);
+
+    if (ratio > 0.01) {
+      this.progressGraphics.fillStyle(0x4ade80, 0.95);
+      this.progressGraphics.fillRoundedRect(
+        x,
+        0,
+        Math.max(3, barW * ratio),
+        barH,
+        2.5
+      );
+    }
+
+    this.progressGraphics.setVisible(true);
   }
 
   private drawGroundContactShadow(): void {
@@ -258,7 +405,7 @@ export class Barracks {
     const hw = FOOTPRINT_HALF_WIDTH + 2;
     const hh = FOOTPRINT_HALF_HEIGHT + 1;
 
-    this.shadowGraphics.fillStyle(0x0d190a, 0.25);
+    this.shadowGraphics.fillStyle(0x0d190a, 0.22);
     this.shadowGraphics.beginPath();
     this.shadowGraphics.moveTo(0, -hh + 2);
     this.shadowGraphics.lineTo(hw, 3);
@@ -293,7 +440,7 @@ export class Barracks {
   }
 }
 
-/** TypeScript'in kullanılmayan sabitleri atmasını engelleyen doküman referansı */
+/** Doküman amaçlı doku ölçüleri (sabitlerin kullanıldığını garantiler) */
 export const BARRACKS_TEXTURE_METRICS = {
   TEX_WIDTH,
   TEX_HEIGHT,
