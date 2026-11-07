@@ -173,7 +173,6 @@ export class TownHall implements GarrisonableBuilding {
   private readonly shadowGraphics: Phaser.GameObjects.Graphics;
   private readonly selectionGraphics: Phaser.GameObjects.Graphics;
   private readonly sprite: Phaser.GameObjects.Image;
-  private readonly progressGraphics: Phaser.GameObjects.Graphics;
 
   private selected = false;
   private currentAge: SettlementAgeId;
@@ -247,10 +246,6 @@ export class TownHall implements GarrisonableBuilding {
     this.sprite.setScale(DISPLAY_SCALE);
     this.sprite.setDepth(sortDepth);
 
-    this.progressGraphics = scene.add.graphics();
-    this.progressGraphics.setPosition(worldPos.x, worldPos.y - 108);
-    this.progressGraphics.setDepth(sortDepth + 120);
-    this.progressGraphics.setVisible(false);
   }
 
   public static preload(scene: Phaser.Scene): void {
@@ -468,7 +463,6 @@ export class TownHall implements GarrisonableBuilding {
     });
 
     this.playOrderPulse();
-    this.refreshWorldProgressBar();
     return { ok: true };
   }
 
@@ -481,9 +475,6 @@ export class TownHall implements GarrisonableBuilding {
 
     // 2) Üretim / araştırma kuyruğu
     if (this.taskQueue.length === 0) {
-      if (this.progressGraphics.visible) {
-        this.progressGraphics.setVisible(false);
-      }
       return;
     }
 
@@ -509,8 +500,6 @@ export class TownHall implements GarrisonableBuilding {
         listener(finishedTask);
       }
     }
-
-    this.refreshWorldProgressBar();
   }
 
   public getHudSnapshot(): TownHallHudSnapshot {
@@ -551,7 +540,6 @@ export class TownHall implements GarrisonableBuilding {
       this.shadowGraphics,
       this.selectionGraphics,
       this.sprite,
-      this.progressGraphics,
     ]);
   }
 
@@ -563,7 +551,6 @@ export class TownHall implements GarrisonableBuilding {
     this.shadowGraphics.destroy();
     this.selectionGraphics.destroy();
     this.sprite.destroy();
-    this.progressGraphics.destroy();
   }
 
   private applyInternalTaskCompletion(task: TownHallTaskDefinition): void {
@@ -593,50 +580,6 @@ export class TownHall implements GarrisonableBuilding {
     });
   }
 
-  private refreshWorldProgressBar(): void {
-    if (this.taskQueue.length === 0) {
-      this.progressGraphics.clear();
-      this.progressGraphics.setVisible(false);
-      return;
-    }
-
-    const active = this.taskQueue[0];
-    const ratio = Phaser.Math.Clamp(
-      active.elapsedMs / active.definition.durationMs,
-      0,
-      1
-    );
-
-    const barW = 58;
-    const barH = 6;
-    const x = -barW * 0.5;
-    const y = 0;
-
-    this.progressGraphics.clear();
-    this.progressGraphics.fillStyle(0x0f172a, 0.88);
-    this.progressGraphics.fillRoundedRect(x - 2, y - 2, barW + 4, barH + 4, 4);
-    this.progressGraphics.lineStyle(1, 0x94a3b8, 0.8);
-    this.progressGraphics.strokeRoundedRect(
-      x - 2,
-      y - 2,
-      barW + 4,
-      barH + 4,
-      4
-    );
-
-    if (ratio > 0.01) {
-      this.progressGraphics.fillStyle(0x4ade80, 0.95);
-      this.progressGraphics.fillRoundedRect(
-        x,
-        y,
-        Math.max(3, barW * ratio),
-        barH,
-        2.5
-      );
-    }
-
-    this.progressGraphics.setVisible(true);
-  }
 
   private drawGroundContactShadow(): void {
     this.shadowGraphics.clear();

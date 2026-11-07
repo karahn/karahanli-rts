@@ -32,6 +32,7 @@ import { ManagedUnit } from './managedUnit';
 import { TRAIN_VILLAGER_TASK_ID, TownHall } from './townHall';
 import {
   CarriedResourceSummary,
+  GarrisonableUnit,
   UnitCategory,
   UnitNutritionState,
 } from './unitTypes';
@@ -142,6 +143,15 @@ export class VillagerSystem {
   private readonly garrisonBuildings = new Map<string, GarrisonableBuilding>();
   private readonly selectedUnitIds = new Set<string>();
   private readonly warriors = new Map<string, Warrior>();
+  /**
+   * Köylü binaya giriş emrini kendi içinde (Villager) yönetir; kılıçlı askerin
+   * böyle bir iç durumu yok. Askerler için bekleyen giriş emri burada tutulur:
+   * girişe yürür, varınca finalizeUnitEnterBuilding ile içeri alınır.
+   */
+  private readonly pendingGarrisonEntries = new Map<
+    string,
+    { buildingId: string; attempts: number }
+  >();
   private nextWarriorNumber = 1;
   private readonly ignoredWorldCameras = new Set<Phaser.Cameras.Scene2D.Camera>();
   private nextVillagerNumber = 1;
@@ -261,6 +271,11 @@ export class VillagerSystem {
 
   /** Köylü veya kılıçlı asker kimliğine göre birimi döndürür. */
   public getUnitById(id: string): ManagedUnit | null {
+    return this.villagers.get(id) ?? this.warriors.get(id) ?? null;
+  }
+
+  /** Garnizona girip çıkabilen birimi (köylü veya kılıçlı asker) döndürür. */
+  private getGarrisonableUnitById(id: string): Villager | Warrior | null {
     return this.villagers.get(id) ?? this.warriors.get(id) ?? null;
   }
 
@@ -388,7 +403,15 @@ export class VillagerSystem {
       return false;
     }
 
-    const rawSelected = this.getSelectedVillagers();
+    // Hem köylüler hem kılıçlı askerler aynı komutla binaya girebilir
+    const rawSelected: Array<Villager | Warrior> = [];
+    for (const unit of this.getSelectedUnits()) {
+      const g = this.getGarrisonableUnitById(unit.id);
+      if (g) {
+        rawSelected.push(g);
+      }
+    }
+
     if (rawSelected.length === 0) {
       return false;
     }
@@ -396,7 +419,7 @@ export class VillagerSystem {
     // Komutan seçiliyse bağlı tüm askerlerini de otomatik olarak dahil et
     const marchingUnits = BuildingGarrisonController.expandWithCommanderRetinue(
       rawSelected,
-      (id) => this.villagers.get(id)
+      (id) => this.getGarrisonableUnitById(id) ?? undefined
     );
 
     if (marchingUnits.length === 0) {
@@ -426,12 +449,24 @@ export class VillagerSystem {
         targetEntrance,
         obstacleQuery
       );
-      unit.setEnterBuildingOrder(
-        building.id,
-        building.buildingName,
-        waypoints,
-        this.worldContext
-      );
+
+      if (unit instanceof Villager) {
+        unit.setEnterBuildingOrder(
+          building.id,
+          building.buildingName,
+          waypoints,
+          this.worldContext
+        );
+        anyOrdered = true;
+        continue;
+      }
+
+      // Kılıçlı asker: giriş emrini sistem düzeyinde takip et
+      this.pendingGarrisonEntries.set(unit.id, {
+        buildingId: building.id,
+        attempts: 0,
+      });
+      unit.setMovePath(waypoints);
       anyOrdered = true;
     }
 
@@ -446,7 +481,7 @@ export class VillagerSystem {
   /**
    * Town Hall içinden belirli kimlikteki birimi veya sıradaki ilk birimi dışarı çıkarır.
    */
-  public ejectOneFromTownHall(unitId?: string): Villager | null {
+  public ejectOneFromTownHall(unitId?: string): ManagedUnit | null {
     if (this.townHall.garrison.getCount() === 0) {
       return null;
     }
@@ -461,7 +496,7 @@ export class VillagerSystem {
     }
 
     this.townHall.playGarrisonPulse();
-    const unit = this.villagers.get(ejected.id) ?? null;
+    const unit = this.getUnitById(ejected.id);
     if (unit) {
       const pos = unit.getWorldPosition();
       this.spawnFloatingText(
@@ -478,7 +513,7 @@ export class VillagerSystem {
    * Town Hall içindeki tüm birimleri (50+ kişilik ordular dahil) bina önündeki
    * açık meydan noktalarına topluca dışarı çıkarır.
    */
-  public ejectAllFromTownHall(): Villager[] {
+  public ejectAllFromTownHall(): ManagedUnit[] {
     const count = this.townHall.garrison.getCount();
     if (count === 0) {
       return [];
@@ -499,18 +534,18 @@ export class VillagerSystem {
       );
     }
 
-    const units: Villager[] = [];
+    const units: ManagedUnit[] = [];
     for (const item of ejectedList) {
-      const v = this.villagers.get(item.id);
-      if (v) {
-        units.push(v);
+      const unit = this.getUnitById(item.id);
+      if (unit) {
+        units.push(unit);
       }
     }
     return units;
   }
 
   private finalizeUnitEnterBuilding(
-    villager: Villager,
+    unit: GarrisonableUnit,
     buildingId: string
   ): boolean {
     const building = this.garrisonBuildings.get(buildingId);
@@ -518,12 +553,13 @@ export class VillagerSystem {
       return false;
     }
 
-    const entered = building.garrison.enterUnit(villager);
+    const entered = building.garrison.enterUnit(unit);
     if (!entered) {
       return false;
     }
 
-    this.selectedUnitIds.delete(villager.id);
+    this.pendingGarrisonEntries.delete(unit.id);
+    this.selectedUnitIds.delete(unit.id);
     this.syncSelectionRings();
 
     if (building.id === this.townHall.id) {
@@ -532,12 +568,64 @@ export class VillagerSystem {
       this.spawnFloatingText(
         thPos.x - 18,
         thPos.y - 26,
-        `${villager.displayName} Girdi`,
+        `${unit.displayName} Girdi`,
         '#93c5fd'
       );
     }
 
     return true;
+  }
+
+  /**
+   * Kılıçlı askerlerin giriş emirlerini ilerletir: girişe yeterince yaklaşan
+   * asker içeri alınır; yolu bitirdiği hâlde varamayan asker için sınırlı
+   * sayıda yeniden yol planlanır.
+   */
+  private processPendingGarrisonEntries(): void {
+    if (this.pendingGarrisonEntries.size === 0) {
+      return;
+    }
+
+    for (const [unitId, entry] of Array.from(
+      this.pendingGarrisonEntries.entries()
+    )) {
+      const unit = this.warriors.get(unitId);
+      const building = this.garrisonBuildings.get(entry.buildingId);
+
+      if (!unit || !building || unit.isGarrisoned()) {
+        this.pendingGarrisonEntries.delete(unitId);
+        continue;
+      }
+
+      if (building.isNearEntranceForEntry(unit.getGridPosition())) {
+        this.finalizeUnitEnterBuilding(unit, building.id);
+        continue;
+      }
+
+      // Yol bitti ama girişe varılamadı (kalabalık vb.) -> sınırlı yeniden planla
+      if (unit.isMoving()) {
+        continue;
+      }
+
+      entry.attempts += 1;
+      if (entry.attempts > 3) {
+        this.pendingGarrisonEntries.delete(unitId);
+        continue;
+      }
+
+      const spots = building.getEntranceApproachSpots();
+      const obstacleQuery = this.createObstacleQuery();
+      const waypoints = findSmoothGridPath(
+        unit.getGridPosition(),
+        spots[entry.attempts % spots.length],
+        obstacleQuery
+      );
+      if (waypoints.length > 0) {
+        unit.setMovePath(waypoints);
+      } else {
+        this.pendingGarrisonEntries.delete(unitId);
+      }
+    }
   }
 
   // --- Seçim Metotları ---
@@ -968,6 +1056,7 @@ export class VillagerSystem {
     for (const warrior of this.warriors.values()) {
       warrior.update(deltaMs);
     }
+    this.processPendingGarrisonEntries();
     this.applyDynamicUnitSeparation(deltaMs);
   }
 
@@ -1630,8 +1719,8 @@ export class VillagerSystem {
         return;
       }
 
-      // Kışlada henüz garnizon/üretim yok: birim seçili değilken kışla panelini açar,
-      // birim seçiliyken akış aşağıdaki hareket komutuna düşer (birimler yanına yürür)
+      // Kışlada garnizon yok, yalnızca üretim var: birim seçili değilken kışla
+      // panelini açar; birim seçiliyken akış aşağıdaki hareket komutuna düşer
       if (hitBarracks && activeSelectedCount === 0) {
         this.selectBarracks();
         return;

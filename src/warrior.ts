@@ -30,15 +30,22 @@ export const WARRIOR_DEFAULT_ATTACK = 9;
 export const WARRIOR_DEFAULT_DEFENSE = 3;
 
 /**
- * Doku içindeki zemin temas noktası — sprite sheet ölçülerek hesaplandı.
- * ORIGIN_Y bilinçli olarak ayak hizasının (139) ~4.5 px üstünde tutuldu: köylü
- * sprite'ında da aynı kural geçerli (origin 132 / ayak 137), böylece iki birim
- * yan yana durduğunda ayakları aynı hizada, yere oturmuş görünür.
+ * Sprite sheet'in 16 karesi ölçülerek hesaplandı.
+ * - Karakterin yatay merkezi her karede 80.0-80.5 arasında (fark 0.5 px).
+ * - Ayak hizası 16 karenin tamamında 137 (fark 0 px) -> animasyon geçişlerinde zıplama yok.
+ * - ORIGIN_Y, köylüdeki kuralla aynı şekilde ayak hizasının 5.5 px üstünde tutuldu
+ *   (köylü: origin 132 / ayak 137.5), böylece iki birim yan yana aynı hizada durur.
  */
-const ORIGIN_X = 0.54531;
-const ORIGIN_Y = 134.5 / WARRIOR_FRAME_HEIGHT;
-/** Köylü ile aynı görünür ölçek (0.37); karakter daha uzun olduğu için ~%15 iri durur */
-const DEFAULT_SCALE = 0.37;
+const WARRIOR_CENTER_X = 80.25;
+const WARRIOR_FEET_Y = 137;
+const ORIGIN_X = WARRIOR_CENTER_X / WARRIOR_FRAME_WIDTH;
+const ORIGIN_Y = (WARRIOR_FEET_Y - 5.5) / WARRIOR_FRAME_HEIGHT;
+
+/**
+ * Köylü 0.37. Karakter kare içinde 96-102 px (köylü 96) olduğu için bu ölçekle
+ * asker yürürken ~%+5, nöbette ~%+10 daha uzun durur — hafif iri ama abartısız.
+ */
+const DEFAULT_SCALE = 0.385;
 const DEFAULT_MOVE_SPEED = 2.15;
 
 const BASE_WALK_FPS = 8.5;
@@ -49,7 +56,7 @@ const ANIM_WALK_BACK = 'karahanli_warrior_walk_back';
 const ANIM_IDLE_FRONT = 'karahanli_warrior_idle_front';
 const ANIM_IDLE_BACK = 'karahanli_warrior_idle_back';
 
-export type WarriorState = 'idle' | 'walking';
+export type WarriorState = 'idle' | 'walking' | 'garrisoned';
 
 export interface WarriorConfig {
   id: string;
@@ -100,6 +107,14 @@ export class Warrior implements ManagedUnit {
   private facingLeft: boolean;
   private nearGoalCrowdedMs = 0;
   private wasSeparatedLastStep = false;
+
+  // --- Garnizon ve komutan (squad/retinue) altyapısı ---
+  private garrisonBuildingId: string | null = null;
+  private garrisonBuildingName: string | null = null;
+  private commanderId: string | null = null;
+  private readonly attachedSubordinateIds = new Set<string>();
+  private readonly maxSatiety = 100;
+  private satiety = 100;
 
   constructor(
     scene: Phaser.Scene,
@@ -213,11 +228,20 @@ export class Warrior implements ManagedUnit {
 
   public getNutritionState(): UnitNutritionState {
     return {
-      satiety: 100,
-      maxSatiety: 100,
+      satiety: this.satiety,
+      maxSatiety: this.maxSatiety,
       foodEconomyActive: false,
       statusText: 'Erzak ekonomisi geliştirme aşamasında',
     };
+  }
+
+  public restoreSatiety(amount: number): number {
+    if (amount <= 0 || this.satiety >= this.maxSatiety) {
+      return 0;
+    }
+    const before = this.satiety;
+    this.satiety = Math.min(this.maxSatiety, this.satiety + amount);
+    return this.satiety - before;
   }
 
   public getCarriedResourceSummary(): CarriedResourceSummary {
@@ -225,6 +249,11 @@ export class Warrior implements ManagedUnit {
   }
 
   public getTaskDescription(): string {
+    if (this.state === 'garrisoned') {
+      return this.garrisonBuildingName
+        ? `${this.garrisonBuildingName} içinde`
+        : 'Binada konuşlu';
+    }
     if (this.state === 'walking') {
       return 'Yürüyor';
     }
@@ -235,6 +264,9 @@ export class Warrior implements ManagedUnit {
 
   public setSelected(value: boolean): void {
     if (this.selected === value) {
+      return;
+    }
+    if (value && this.garrisonBuildingId !== null) {
       return;
     }
     this.selected = value;
@@ -251,10 +283,6 @@ export class Warrior implements ManagedUnit {
 
   public isMoving(): boolean {
     return this.state === 'walking';
-  }
-
-  public isGarrisoned(): boolean {
-    return false;
   }
 
   // --- Konum ve hareket ---
@@ -279,6 +307,10 @@ export class Warrior implements ManagedUnit {
   }
 
   public setMovePath(waypoints: GridCoord[]): void {
+    if (this.garrisonBuildingId !== null) {
+      return;
+    }
+
     if (waypoints.length === 0) {
       this.stopMovement();
       return;
@@ -299,6 +331,10 @@ export class Warrior implements ManagedUnit {
   public update(deltaMs: number): void {
     if (this.state !== 'walking') {
       this.wasSeparatedLastStep = false;
+      return;
+    }
+
+    if (this.garrisonBuildingId !== null) {
       return;
     }
 
@@ -373,6 +409,10 @@ export class Warrior implements ManagedUnit {
     dRow: number,
     isWalkablePos: (col: number, row: number) => boolean
   ): boolean {
+    if (this.garrisonBuildingId !== null) {
+      return false;
+    }
+
     if (Math.abs(dCol) < 0.0001 && Math.abs(dRow) < 0.0001) {
       return false;
     }
@@ -517,6 +557,80 @@ export class Warrior implements ManagedUnit {
     }
 
     this.sprite.setFlipX(this.facingLeft);
+  }
+
+  // --- Komutan - bağlı asker (squad/retinue) altyapısı ---
+
+  public getCommanderId(): string | null {
+    return this.commanderId;
+  }
+
+  public setCommanderId(commanderId: string | null): void {
+    this.commanderId = commanderId;
+  }
+
+  public getAttachedUnitIds(): readonly string[] {
+    return Array.from(this.attachedSubordinateIds);
+  }
+
+  public attachSubordinateUnit(unitId: string): void {
+    if (unitId !== this.id) {
+      this.attachedSubordinateIds.add(unitId);
+    }
+  }
+
+  public detachSubordinateUnit(unitId: string): void {
+    this.attachedSubordinateIds.delete(unitId);
+  }
+
+  // --- Garnizon Durum ve Yaşam Döngüsü ---
+
+  public isGarrisoned(): boolean {
+    return this.state === 'garrisoned' && this.garrisonBuildingId !== null;
+  }
+
+  public getGarrisonBuildingId(): string | null {
+    return this.garrisonBuildingId;
+  }
+
+  /**
+   * Birim binaya girdiğinde çağrılır: yürüyüşü durdurur, seçimi temizler ve
+   * sprite'ı haritadan gizler. Köylü ile aynı yaşam döngüsünü izler, böylece
+   * karma garnizonlar (köylü + asker) tek sistemle yönetilir.
+   */
+  public onEnterGarrison(buildingId: string, buildingName: string): void {
+    this.garrisonBuildingId = buildingId;
+    this.garrisonBuildingName = buildingName;
+    this.pathQueue = [];
+    this.nearGoalCrowdedMs = 0;
+    this.wasSeparatedLastStep = false;
+    this.selected = false;
+    this.state = 'garrisoned';
+
+    this.sprite.anims.stop();
+    this.selectionRing.setVisible(false);
+    this.sprite.setVisible(false);
+  }
+
+  /**
+   * Birim binadan çıkarıldığında çağrılır: çıkış noktasına yerleştirir,
+   * sprite'ı yeniden görünür yapar ve nöbet duruşuna döndürür.
+   */
+  public onExitGarrison(exitSpot: GridCoord): void {
+    this.garrisonBuildingId = null;
+    this.garrisonBuildingName = null;
+    this.pathQueue = [];
+    this.nearGoalCrowdedMs = 0;
+    this.wasSeparatedLastStep = false;
+
+    this.gridPos.col = exitSpot.col;
+    this.gridPos.row = exitSpot.row;
+    this.facingBack = false;
+    this.facingLeft = true;
+
+    this.sprite.setVisible(true);
+    this.enterIdlePose();
+    this.syncVisualTransform();
   }
 
   private drawSelectionRing(): void {

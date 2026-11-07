@@ -21,21 +21,27 @@ import { GridCoord } from './pathfinding';
 export const BARRACKS_TEXTURE_KEY = 'barracks_karahanli';
 export const BARRACKS_ASSET_PATH = 'assets/sprites/barracks_karahanli.png';
 
-const TEX_WIDTH = 322;
-const TEX_HEIGHT = 177;
+const TEX_WIDTH = 384;
+const TEX_HEIGHT = 254;
 /**
  * Dokunun izometrik taban elmasının merkezine karşılık gelen orijin.
- * Town Hall dokusunda kullanılan yöntemin aynısıyla (taban elmasının alt
- * kenarları ölçülerek) hesaplandı — Town Hall'da sapma 0.8 px.
+ * Town Hall dokusunda kullanılan yöntemin aynısıyla hesaplandı: silüetin en sol
+ * ve en sağ noktaları elmasın yan köşeleri, alt ucu ise ön köşesi kabul edilip
+ * merkez bulundu. Bu dokuda iki yan köşe arasındaki yükseklik farkı yalnızca
+ * 5 px (%0.7) — Town Hall'da 10 px (%3.3), yani taban elmasa çok daha yakın.
  */
-const ORIGIN_X = 0.5;
-const ORIGIN_Y = 0.56497;
-/** 2x retina dokuyu dünya uzayında tam 3x2 karo elmasına oturtan ölçek */
-const DISPLAY_SCALE = 0.49844;
+const ORIGIN_X = 191.82 / TEX_WIDTH;
+const ORIGIN_Y = 153.53 / TEX_HEIGHT;
+/** 2x retina dokuyu dünya uzayında tam 3x3 karo elmasına oturtan ölçek */
+const DISPLAY_SCALE = 96 / 191.82;
 
-/** 3x2 karo ayak izinin dünya uzayındaki elmas yarı genişliği / yarı yüksekliği */
-const FOOTPRINT_HALF_WIDTH = 80;
-const FOOTPRINT_HALF_HEIGHT = 37.88;
+/**
+ * 3x3 karo ayak izinin dünya uzayındaki elmas yarı genişliği / yarı yüksekliği.
+ * Yükseklik, isabet testi ve ayrışma için elmasın geometrik değerinin (~48)
+ * biraz altında tutuldu — birimler binaya zar zor değil rahatça yaklaşabilsin.
+ */
+const FOOTPRINT_HALF_WIDTH = 96;
+const FOOTPRINT_HALF_HEIGHT = 45.5;
 
 /** Kılıçlı asker üretim süresi (ms) ve maliyeti (test aşamasında ücretsiz) */
 export const WARRIOR_PRODUCTION_DURATION_MS = 5000;
@@ -80,7 +86,7 @@ export const DEFAULT_BARRACKS_CONFIG: BarracksConfig = {
   originCol: 6,
   originRow: 10,
   footprintCols: 3,
-  footprintRows: 2,
+  footprintRows: 3,
   maxHp: 800,
 };
 
@@ -102,7 +108,6 @@ export class Barracks {
   private readonly shadowGraphics: Phaser.GameObjects.Graphics;
   private readonly selectionGraphics: Phaser.GameObjects.Graphics;
   private readonly sprite: Phaser.GameObjects.Image;
-  private readonly progressGraphics: Phaser.GameObjects.Graphics;
 
   private selected = false;
   private productionElapsedMs: number | null = null;
@@ -152,10 +157,6 @@ export class Barracks {
     this.sprite.setScale(DISPLAY_SCALE);
     this.sprite.setDepth(sortDepth);
 
-    this.progressGraphics = scene.add.graphics();
-    this.progressGraphics.setPosition(worldPos.x, worldPos.y - 74);
-    this.progressGraphics.setDepth(sortDepth + 120);
-    this.progressGraphics.setVisible(false);
   }
 
   public static preload(scene: Phaser.Scene): void {
@@ -252,7 +253,6 @@ export class Barracks {
     }
     this.queueLength += 1;
     this.playPulse();
-    this.refreshWorldProgressBar();
     return { ok: true };
   }
 
@@ -262,9 +262,6 @@ export class Barracks {
 
   public update(deltaMs: number): void {
     if (this.queueLength === 0 || this.productionElapsedMs === null) {
-      if (this.progressGraphics.visible) {
-        this.progressGraphics.setVisible(false);
-      }
       return;
     }
 
@@ -288,8 +285,6 @@ export class Barracks {
         listener(TRAIN_WARRIOR_TASK_ID);
       }
     }
-
-    this.refreshWorldProgressBar();
   }
 
   public getHudSnapshot(): BarracksHudSnapshot {
@@ -350,7 +345,6 @@ export class Barracks {
       this.shadowGraphics,
       this.selectionGraphics,
       this.sprite,
-      this.progressGraphics,
     ]);
   }
 
@@ -360,45 +354,8 @@ export class Barracks {
     this.shadowGraphics.destroy();
     this.selectionGraphics.destroy();
     this.sprite.destroy();
-    this.progressGraphics.destroy();
   }
 
-  private refreshWorldProgressBar(): void {
-    if (this.queueLength === 0 || this.productionElapsedMs === null) {
-      this.progressGraphics.clear();
-      this.progressGraphics.setVisible(false);
-      return;
-    }
-
-    const ratio = Phaser.Math.Clamp(
-      this.productionElapsedMs / WARRIOR_PRODUCTION_DURATION_MS,
-      0,
-      1
-    );
-
-    const barW = 58;
-    const barH = 6;
-    const x = -barW * 0.5;
-
-    this.progressGraphics.clear();
-    this.progressGraphics.fillStyle(0x0f172a, 0.88);
-    this.progressGraphics.fillRoundedRect(x - 2, -2, barW + 4, barH + 4, 4);
-    this.progressGraphics.lineStyle(1, 0x94a3b8, 0.8);
-    this.progressGraphics.strokeRoundedRect(x - 2, -2, barW + 4, barH + 4, 4);
-
-    if (ratio > 0.01) {
-      this.progressGraphics.fillStyle(0x4ade80, 0.95);
-      this.progressGraphics.fillRoundedRect(
-        x,
-        0,
-        Math.max(3, barW * ratio),
-        barH,
-        2.5
-      );
-    }
-
-    this.progressGraphics.setVisible(true);
-  }
 
   private drawGroundContactShadow(): void {
     this.shadowGraphics.clear();
