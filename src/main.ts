@@ -98,9 +98,9 @@ class MainScene extends Phaser.Scene {
       this.forestSystem,
       this.woodDepot,
       this.townHall,
-      this.cameraController,
-      this.barracks
+      this.cameraController
     );
+    if (this.barracks) this.villagerSystem.setBarracks(this.barracks);
     this.villagerSystem.spawnInitialVillagers();
 
     // Age of Empires & Celtic Kings tarzı yakın plan portreli alt bilgi ve yönetim paneli (Town Hall + Kışla)
